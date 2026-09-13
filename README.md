@@ -120,7 +120,7 @@ A feature-rich Discord music bot that streams audio from YouTube and Spotify. Bu
 ### Run locally
 
 ```bash
-git clone https://github.com/ts-solidarity/essusic.git
+git clone https://github.com/wleeaf/essusic.git
 cd essusic
 pip install -r requirements.txt
 cp .env.example .env  # fill in tokens
