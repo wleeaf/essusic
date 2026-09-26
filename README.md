@@ -7,14 +7,14 @@ Play YouTube and SoundCloud links, search for songs, or queue Spotify tracks, al
 ## Features
 
 - **Multi-source playback** — YouTube, Spotify (tracks/playlists/albums), SoundCloud, and radio streams
-- **Interactive player** — Transport controls, clickable seek bar, and volume buttons, refreshed at the bottom of the channel on track changes
+- **Interactive player** — A unified violet theme, labeled transport controls, timestamp seeking, artwork, and an up-next preview; refreshed at the bottom of the channel on track changes
 - **Per-server queues** — Loop modes, smart shuffle, queue import/export, undo, and move/reorder
 - **Audio controls** — Filters (bass boost, nightcore, vaporwave, 8D, karaoke), 10-band EQ with presets, speed control, loudness normalization, and crossfade
 - **Radio mode** — Artist-seeded recommendations when the Spotify app has access to the required endpoints
 - **Autoplay** — Automatically queues similar tracks when the queue runs out
 - **Playlists** — Save/load server playlists with collaborator support
 - **Favorites** — Per-user favorites that can be queued in one command
-- **Search** — YouTube and Spotify search with interactive result buttons
+- **Search** — YouTube and Spotify search with a compact track selection menu
 - **Ratings & stats** — Rate tracks, view top played, top rated, and personal/server listening stats
 - **Lyrics** — Fetch lyrics for the current or any track
 - **DJ mode** — Restrict destructive commands to a DJ role, or enable approval queue mode
@@ -22,6 +22,23 @@ Play YouTube and SoundCloud links, search for songs, or queue Spotify tracks, al
 - **24/7 mode** — Stay connected to voice even when idle
 - **Queue recovery** — Saves current and queued tracks to JSON; restored tracks are available when playback is started again
 - **Dockerized** — Single-container deployment with docker compose
+
+## Interface
+
+The player, queue, search, libraries, lyrics, charts, help, and settings share a consistent card layout. Player states distinguish paused audio, live streams, and unknown durations. Long lists and lyrics use previous/next controls in a single message, while search uses a track selection menu. Expired menus are visibly disabled.
+
+![Essusic player interface preview](docs/player-preview.png)
+
+*Local preview using the actual embed and control builders. Discord determines the final typography, spacing, and button colors.*
+
+To explore all 15 interface sections without connecting a bot:
+
+```bash
+python scripts/preview_ui.py
+# Open build/ui-preview.html in your browser.
+```
+
+The gallery supports dark/light previews, compact width, help navigation, and sample pages. It uses fictional sample content and makes no network requests.
 
 ## Commands
 
@@ -198,7 +215,7 @@ python -m unittest discover -s tests -v
 python -m compileall -q bot.py cogs music web
 ```
 
-The regression suite runs without Discord/Spotify credentials, network media access, or FFmpeg. It covers playback transitions, concurrent requests, queue recovery, URL parsing, and the HTTP API. CI runs it on Python 3.12 and 3.14. Use [the manual test plan](test-todo.md) for real Discord voice playback and third-party integrations.
+The regression suite runs without Discord/Spotify credentials, network media access, or FFmpeg. It covers playback transitions, concurrent requests, queue recovery, URL parsing, the HTTP API, component limits, pagination, and long-content rendering. CI runs it on Python 3.12 and 3.14. Use [the manual test plan](test-todo.md) for real Discord voice playback and third-party integrations.
 
 | Location | Responsibility |
 |---|---|
@@ -209,5 +226,7 @@ The regression suite runs without Discord/Spotify credentials, network media acc
 | `music/spotify_resolver.py` | Spotify metadata and recommendations |
 | `music/url_parser.py` | Input classification |
 | `music/config.py` | Shared storage paths |
+| `music/presentation.py` | Shared cards, typography, progress, and pagination |
+| `scripts/preview_ui.py` | Offline interface gallery generator |
 | `web/app.py` | Authenticated operator API |
 | `tests/` | Automated regression tests |

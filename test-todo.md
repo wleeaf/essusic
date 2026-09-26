@@ -63,8 +63,8 @@ Test in order — earlier sections set up state for later ones.
 ## 5. Search
 
 - [ ] `/search <query>` — should use the default search provider
-- [ ] `/youtube-search <query>` — should show YouTube results with selection buttons
-- [ ] `/spotify-search <query>` — should show Spotify results with selection buttons
+- [ ] `/youtube-search <query>` — should show YouTube results with a track selection menu
+- [ ] `/spotify-search <query>` — should show Spotify results with a track selection menu
 - [ ] `/searchmode` — toggle between YouTube and Spotify, verify `/search` uses the new default
 - [ ] Pick a result from the search view — should queue and play it
 
@@ -156,3 +156,18 @@ Test in order — earlier sections set up state for later ones.
 - [ ] Everyone leaves VC while music is playing (24/7 off) — bot should auto-disconnect
 - [ ] Queue 50+ tracks to hit the default max — verify the limit message
 - [ ] `/play` a YouTube Mix link (`list=RD...`) — should prompt with mix confirmation view
+
+
+## 17. Interface checks
+
+- [ ] Player — verify labeled transport buttons, pause/resume label, artwork, repeat/volume fields, and the next-track preview
+- [ ] Seeking — verify the first timestamp is `0:00`; live streams have no time buttons and disabled rewind/forward
+- [ ] Queue — check a single page, 7+ tracks, and an empty queue; verify positions remain correct after paging
+- [ ] Search — select a track from the menu; verify it is added without replacing the current track
+- [ ] Favorites / playlists / charts — page through long lists and verify no items are missing
+- [ ] Lyrics — verify long lyrics stay in one paginated message and preserve line breaks
+- [ ] Help — open every category and return to “Start here”
+- [ ] Requests — verify pending, approved, declined, and expired cards; resolved cards must not change to expired
+- [ ] Votes / ratings — verify counts update and timeout disables controls
+- [ ] Settings / validation — verify consistent cards for confirmations and errors, including ephemeral replies
+- [ ] Discord mobile / light theme — check readability, control labels, and page navigation on a real client

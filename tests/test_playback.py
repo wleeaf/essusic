@@ -215,8 +215,13 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
                                       response=SimpleNamespace(defer=AsyncMock()))
         track = TrackInfo('Song', 'query')
         await view._make_callback(track)(interaction)
-        self.cog._enqueue_and_play.assert_awaited_once_with(interaction, track)
-        self.assertEqual(track.requester_id, 42)
+        self.cog._enqueue_and_play.assert_awaited_once()
+        called_interaction, requested = self.cog._enqueue_and_play.await_args.args
+        self.assertIs(called_interaction, interaction)
+        self.assertEqual(requested.requester_id, 42)
+        self.assertEqual(requested.title, track.title)
+        self.assertIsNot(requested, track)
+        self.assertEqual(track.requester_id, 0)
 
     async def test_invalid_import_is_rejected_before_voice_connection(self):
         self.cog._ensure_voice = AsyncMock()
