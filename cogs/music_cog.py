@@ -9,7 +9,6 @@ import re
 import time
 from dataclasses import replace
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 import discord
@@ -166,50 +165,6 @@ class SearchView(discord.ui.View):
         self.select.placeholder = "Search expired · run /search again"
         for item in self.children:
             item.disabled = True  # type: ignore[union-attr]
-        try:
-            await self.original_interaction.edit_original_response(view=self)
-        except discord.HTTPException:
-            pass
-
-
-class MixConfirmView(discord.ui.View):
-    """Asks the user whether to play a YouTube Mix or just the single video."""
-
-    def __init__(self, cog: MusicCog, interaction: discord.Interaction, url: str) -> None:
-        super().__init__(timeout=30)
-        self.cog = cog
-        self.original_interaction = interaction
-        self.url = url
-
-    @discord.ui.button(label="Play this track", emoji="▶️", style=discord.ButtonStyle.primary)
-    async def play_video(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.defer()
-        self._disable_all()
-        await self.original_interaction.edit_original_response(view=self)
-        # Strip list= params to get just the video URL
-        parsed = urlparse(self.url)
-        params = parse_qs(parsed.query)
-        video_id = params.get("v", [None])[0]
-        if video_id:
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-        else:
-            video_url = self.url
-        # Re-invoke play logic as a YouTube URL
-        await self.cog._play_single_url(interaction, video_url)
-
-    @discord.ui.button(label="Queue the mix", emoji="➕", style=discord.ButtonStyle.secondary)
-    async def play_mix(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.defer()
-        self._disable_all()
-        await self.original_interaction.edit_original_response(view=self)
-        await self.cog._play_youtube_playlist(interaction, self.url)
-
-    def _disable_all(self) -> None:
-        for item in self.children:
-            item.disabled = True  # type: ignore[union-attr]
-
-    async def on_timeout(self) -> None:
-        self._disable_all()
         try:
             await self.original_interaction.edit_original_response(view=self)
         except discord.HTTPException:
@@ -1757,18 +1712,6 @@ class MusicCog(commands.Cog):
 
         # YouTube playlist
         if input_type == InputType.YOUTUBE_PLAYLIST:
-            # Detect YouTube Mix (list=RD...) — these are personalized
-            params = parse_qs(urlparse(value).query)
-            list_id = params.get("list", [""])[0]
-            if list_id.startswith("RD"):
-                await interaction.response.send_message(
-                    embed=notice("This is a **YouTube Mix** — its contents are personalized and "
-                    "may differ from what you see in your browser.\n"
-                    "What would you like to do?", section='Playback'),
-                    view=MixConfirmView(self, interaction, value),
-                )
-                return
-
             await interaction.response.defer()
             await self._play_youtube_playlist(interaction, value)
             return

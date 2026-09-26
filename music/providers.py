@@ -222,6 +222,9 @@ class MediaService:
             "cookiefile": io.StringIO(cookies) if cookies else None,
             "cookiesfrombrowser": None,
             "cachedir": False,
+            # YouTube can advertise signed formats that return 403. Probe only
+            # selection candidates to reject inaccessible URLs before playback.
+            "check_formats": "selected",
             "logger": QuietLogger(),
             "noplaylist": not playlist,
             "socket_timeout": 20,

@@ -171,7 +171,8 @@ Use dedicated test accounts and two Discord servers. Do not reuse production coo
 - [ ] `/remove 999` — should say invalid position
 - [ ] Everyone leaves VC while music is playing (24/7 off) — bot should auto-disconnect
 - [ ] Queue 50+ tracks to hit the default max — verify the limit message
-- [ ] `/play` a YouTube Mix link (`list=RD...`) — should prompt with mix confirmation view
+- [ ] `/play` a song link with `list=LM`, `list=PL...`, or `list=RD...` — should play only the selected song
+- [ ] `/play` an explicit `/playlist?list=...` link — should queue the collection
 
 
 ## 17. Interface checks

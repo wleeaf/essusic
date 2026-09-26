@@ -188,6 +188,56 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(options["cookiesfrombrowser"])
         self.assertFalse(options["cachedir"])
 
+    def test_format_selection_skips_audio_that_cannot_be_downloaded(self):
+        import yt_dlp
+
+        def extract(extractor, query, download=False):
+            return extractor.process_ie_result(
+                {
+                    "id": "fixture",
+                    "title": "Fixture",
+                    "extractor": "test",
+                    "extractor_key": "Test",
+                    "formats": [
+                        {
+                            "format_id": "working",
+                            "url": "https://example.invalid/low.webm",
+                            "ext": "webm",
+                            "acodec": "opus",
+                            "vcodec": "none",
+                            "abr": 64,
+                        },
+                        {
+                            "format_id": "blocked",
+                            "url": "https://example.invalid/high.webm",
+                            "ext": "webm",
+                            "acodec": "opus",
+                            "vcodec": "none",
+                            "abr": 160,
+                        },
+                    ],
+                },
+                download=download,
+            )
+
+        def download(extractor, filename, info, **kwargs):
+            return info["format_id"] == "working", True
+
+        with (
+            patch.object(
+                yt_dlp.YoutubeDL, "extract_info", autospec=True, side_effect=extract
+            ),
+            patch.object(
+                yt_dlp.YoutubeDL, "dl", autospec=True, side_effect=download
+            ) as probe,
+        ):
+            result = self.media._extract("fixture", COOKIES, False, False)
+        self.assertEqual(result["format_id"], "working")
+        self.assertEqual(
+            [call.args[2]["format_id"] for call in probe.call_args_list],
+            ["blocked", "working"],
+        )
+
     async def test_deleted_credentials_waiting_for_global_slot_never_start_request(
         self,
     ):

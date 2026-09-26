@@ -57,7 +57,7 @@ class StateTests(unittest.TestCase):
     def test_url_classification(self):
         cases = [
             ('https://youtube.com/live/abc', InputType.YOUTUBE_URL, None),
-            ('https://youtube.com/watch?v=a&list=b', InputType.YOUTUBE_PLAYLIST, None),
+            ('https://youtube.com/watch?v=a&list=b', InputType.YOUTUBE_URL, 'https://youtube.com/watch?v=a'),
             ('https://music.youtube.com/browse/abc', InputType.YOUTUBE_PLAYLIST, None),
             ('https://open.spotify.com/intl-tr/track/abc?si=x', InputType.SPOTIFY_TRACK, 'abc'),
             ('https://example.com/open.spotify.com/track/abc', InputType.SEARCH_QUERY, None),
@@ -68,3 +68,32 @@ class StateTests(unittest.TestCase):
         for query, kind, value in cases:
             with self.subTest(query=query):
                 self.assertEqual(classify(query), (kind, value or query))
+
+    def test_shared_youtube_song_links_ignore_playlist_context(self):
+        cases = [
+            ('https://music.youtube.com/watch?v=dUVY1ijQPBc&list=LM',
+             'https://www.youtube.com/watch?v=dUVY1ijQPBc'),
+            ('https://www.youtube.com/watch?v=dUVY1ijQPBc&list=PLexample&index=3&t=42',
+             'https://www.youtube.com/watch?v=dUVY1ijQPBc&t=42'),
+            ('https://music.youtube.com/watch?v=dUVY1ijQPBc&list=RDexample&start_radio=1',
+             'https://www.youtube.com/watch?v=dUVY1ijQPBc'),
+            ('https://youtu.be/dUVY1ijQPBc?list=LM&si=share',
+             'https://youtu.be/dUVY1ijQPBc?si=share'),
+            ('https://youtube.com/shorts/dUVY1ijQPBc?list=PLexample',
+             'https://youtube.com/shorts/dUVY1ijQPBc'),
+            ('music.youtube.com/watch?v=dUVY1ijQPBc&list=LM',
+             'https://www.youtube.com/watch?v=dUVY1ijQPBc'),
+        ]
+        for original, expected in cases:
+            with self.subTest(original=original):
+                self.assertEqual(classify(original), (InputType.YOUTUBE_URL, expected))
+
+    def test_explicit_youtube_playlist_links_still_request_collection(self):
+        for url in (
+            'https://music.youtube.com/playlist?list=PLexample',
+            'https://youtube.com/playlist?list=RDexample',
+            'https://music.youtube.com/browse/MPREexample',
+            'https://youtube.com/watch?list=PLexample',
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(classify(url), (InputType.YOUTUBE_PLAYLIST, url))

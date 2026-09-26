@@ -4,6 +4,8 @@ Essusic is a Discord music bot with an interactive player, separate queues, and 
 
 Play YouTube and SoundCloud links, search for songs, or queue Spotify tracks, albums, and playlists. **Spotify supplies metadata; audio is found and played through YouTube**, so matches can differ from the original recording.
 
+YouTube and YouTube Music song links play the selected track, even when shared with `list=LM` or another playlist parameter. To queue a whole playlist or album, use its `/playlist?list=…` or `/browse/…` link.
+
 ## Features
 
 - **Owner-run setup** — Install first, then connect sources on a private setup page; credentials are encrypted and never shared between servers
@@ -204,7 +206,7 @@ The overlay binds HTTP to **127.0.0.1:8080 on the host** and sets the listener i
 - Removing or replacing YouTube credentials stops active YouTube playback and clears its queue. Already-running provider requests may finish, but stale YouTube extraction results cannot start playback. Deletion removes the active credential file; operators must manage retention of their own backups separately.
 - Encryption protects stored files. The running host needs the key and plaintext credentials to make provider requests; self-host if you want to control that host yourself.
 - **Upgrading:** global `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, and `data/cookies.txt` are no longer read. Configure the setup service, then have each owner run `/setup`. Remove old shared secrets and token-cache files from your deployment once migrated. Existing queues, playlists and settings remain compatible.
-- Cookies have no guaranteed one-year lifetime. They may expire, rotate, or be rejected; hosting IP restrictions still apply. The test resolves a sample video and tries a backup only when that video is unavailable. Authentication, rate-limit, and extraction failures produce specific messages. A successful check does not verify a fixed expiry or every track. Some YouTube clients also need a [PO token](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide); this version has no PO-token upload integration.
+- Cookies have no guaranteed one-year lifetime. They may expire, rotate, or be rejected; hosting IP restrictions still apply. The test resolves a sample video and tries a backup only when that video is unavailable. Authentication, rate-limit, and extraction failures produce specific messages. Selected audio streams are probed for download access before playback, so rejected formats can be skipped. A successful check does not verify a fixed expiry or every track. Some YouTube clients also need a [PO token](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide); this version has no PO-token upload integration.
 
 ## Optional HTTP API
 

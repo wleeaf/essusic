@@ -1,6 +1,6 @@
 import re
 from enum import Enum, auto
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 class InputType(Enum):
@@ -17,13 +17,16 @@ class InputType(Enum):
 
 _STREAM_RE = re.compile(
     r"(?:https?://)\S+\.(?:m3u8?|pls|aac|mp3|ogg|opus)(?:\?\S*)?"
-    r"|(?:https?://)\S+(?:/stream|/live|/radio)\S*", re.IGNORECASE)
+    r"|(?:https?://)\S+(?:/stream|/live|/radio)\S*",
+    re.IGNORECASE,
+)
 
 
 def classify(query: str) -> tuple[InputType, str]:
     """Return (InputType, cleaned_value) for a user query.
 
-    For YouTube URLs the cleaned value is the original URL.
+    YouTube video URLs have incidental playlist/radio context removed.
+    Explicit playlist URLs retain their original value.
     For Spotify URLs it's the Spotify ID.
     For search queries it's the original string.
     """
@@ -38,7 +41,9 @@ def classify(query: str) -> tuple[InputType, str]:
         return InputType.SEARCH_QUERY, query
 
     if host == "open.spotify.com":
-        match = re.fullmatch(r"/(?:intl-[^/]+/)?(track|playlist|album)/([A-Za-z0-9]+)/?", parsed.path)
+        match = re.fullmatch(
+            r"/(?:intl-[^/]+/)?(track|playlist|album)/([A-Za-z0-9]+)/?", parsed.path
+        )
         if match:
             kind, spotify_id = match.groups()
             return {
@@ -47,8 +52,46 @@ def classify(query: str) -> tuple[InputType, str]:
                 "album": InputType.SPOTIFY_ALBUM,
             }[kind], spotify_id
 
-    if host in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}:
-        if "list" in parse_qs(parsed.query) or parsed.path.startswith("/browse/"):
+    if host in {
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "music.youtube.com",
+        "youtu.be",
+        "www.youtu.be",
+    }:
+        params = parse_qs(parsed.query)
+        video_selected = (
+            (parsed.path.rstrip("/") == "/watch" and bool(params.get("v", [""])[0]))
+            or (
+                host in {"youtu.be", "www.youtu.be"}
+                and bool(re.fullmatch(r"[A-Za-z0-9_-]{11}", parsed.path.strip("/")))
+            )
+            or bool(
+                re.fullmatch(r"/(?:shorts|live|embed)/[A-Za-z0-9_-]{11}/?", parsed.path)
+            )
+        )
+        if video_selected:
+            # Shared song links carry the sender's playlist (e.g. list=LM).
+            # A selected video takes priority; /playlist and /browse still
+            # explicitly request the collection.
+            video_query = urlencode(
+                [
+                    (key, value)
+                    for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                    if key not in {"list", "index", "start_radio"}
+                ]
+            )
+            return InputType.YOUTUBE_URL, urlunsplit(
+                (
+                    parsed.scheme,
+                    "www.youtube.com" if host == "music.youtube.com" else parsed.netloc,
+                    parsed.path,
+                    video_query,
+                    parsed.fragment,
+                )
+            )
+        if "list" in params or parsed.path.startswith("/browse/"):
             return InputType.YOUTUBE_PLAYLIST, query
         return InputType.YOUTUBE_URL, query
 

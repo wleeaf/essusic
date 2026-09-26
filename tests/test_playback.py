@@ -94,6 +94,21 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.queue.add(TrackInfo('Second', 'second', duration=120))
         self.addCleanup(self.cog._cancel_crossfade_timer, 1)
 
+    async def test_play_and_playnext_route_shared_music_song_to_single_track(self):
+        self.cog._play_single_url = AsyncMock()
+        self.cog._play_youtube_playlist = AsyncMock()
+        interaction = SimpleNamespace(guild=self.guild, response=SimpleNamespace(defer=AsyncMock()))
+        url = 'https://music.youtube.com/watch?v=dUVY1ijQPBc&list=LM'
+        await MusicCog.play.callback(self.cog, interaction, url)
+        self.cog._play_single_url.assert_awaited_once_with(
+            interaction, 'https://www.youtube.com/watch?v=dUVY1ijQPBc')
+        self.cog._play_youtube_playlist.assert_not_awaited()
+        self.cog._play_single_url.reset_mock()
+        await MusicCog.playnext.callback(self.cog, interaction, url)
+        self.cog._play_single_url.assert_awaited_once_with(
+            interaction, 'https://www.youtube.com/watch?v=dUVY1ijQPBc', play_next=True)
+        self.cog._play_youtube_playlist.assert_not_awaited()
+
     async def test_missing_source_preserves_queue_without_claiming_playback(self):
         from music.providers import SourceError
         self.vc.playing = False
