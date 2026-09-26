@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from music.credentials import CredentialError, CredentialStore, validate_cookies
-from music.providers import MediaService, SourceError
+from music.providers import MediaService, SourceError, YOUTUBE_TEST_URLS
 from music.spotify_resolver import SpotifyResolver
 
 KEY = base64.b64encode(b"k" * 32).decode()
@@ -239,6 +239,66 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
                 await self.media.extract(1, "hello")
             self.assertEqual(extract.call_count, 1)
         self.assertEqual(self.store.status(1)["youtube"]["state"], "attention")
+
+    async def test_connection_check_falls_back_only_for_unavailable_video(self):
+        self.store.save(1, "youtube", {"cookies": COOKIES})
+        with patch.object(
+            self.media,
+            "_extract",
+            side_effect=[
+                RuntimeError("Video is unavailable. sensitive-provider-body"),
+                {"url": "audio"},
+            ],
+        ) as extract:
+            result = await self.media.test(1, "youtube")
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            [call.args[0] for call in extract.call_args_list], list(YOUTUBE_TEST_URLS)
+        )
+        self.assertTrue(all(call.args[1] == COOKIES for call in extract.call_args_list))
+        self.assertEqual(self.store.status(1)["youtube"]["state"], "ready")
+        self.assertNotIn(1, self.media._failures)
+
+    async def test_unavailable_samples_do_not_blame_credentials(self):
+        self.store.save(1, "youtube", {"cookies": COOKIES})
+        with patch.object(
+            self.media,
+            "_extract",
+            side_effect=RuntimeError("Video unavailable. sensitive-provider-body"),
+        ) as extract:
+            result = await self.media.test(1, "youtube")
+        self.assertFalse(result["success"])
+        self.assertEqual(extract.call_count, 2)
+        self.assertIn("connection-test videos are unavailable", result["message"])
+        self.assertNotIn("sensitive", result["message"])
+        self.assertNotIn("Check the credentials", result["message"])
+
+    async def test_access_rejection_does_not_retry_samples_or_echo_provider_details(
+        self,
+    ):
+        self.store.save(1, "youtube", {"cookies": COOKIES})
+        with patch.object(
+            self.media,
+            "_extract",
+            side_effect=RuntimeError(
+                "Sign in to confirm you’re not a bot. sensitive-provider-body"
+            ),
+        ) as extract:
+            result = await self.media.test(1, "youtube")
+        self.assertFalse(result["success"])
+        extract.assert_called_once()
+        self.assertIn("rejected", result["message"])
+        self.assertNotIn("sensitive", result["message"])
+        self.assertGreater(self.media._next_request[1], time.monotonic())
+
+    async def test_unknown_check_failure_remains_redacted(self):
+        self.store.save(1, "youtube", {"cookies": COOKIES})
+        with patch.object(
+            self.media, "_extract", side_effect=RuntimeError("sensitive-provider-body")
+        ):
+            result = await self.media.test(1, "youtube")
+        self.assertFalse(result["success"])
+        self.assertNotIn("sensitive", result["message"])
 
     async def test_soundcloud_does_not_receive_youtube_cookies(self):
         self.store.save(1, "youtube", {"cookies": COOKIES})

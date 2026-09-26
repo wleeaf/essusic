@@ -13,11 +13,77 @@ from .credentials import CredentialError, CredentialStore, validate_cookies
 from .spotify_resolver import SpotifyResolver
 from .url_parser import InputType, classify
 
-YOUTUBE_TEST_URL = "https://www.youtube.com/watch?v=BaW_jenozKc"
+# The former yt-dlp example (BaW_jenozKc) was removed. Use its current
+# upstream example plus an independent sample if a video becomes unavailable.
+YOUTUBE_TEST_URLS = (
+    "https://www.youtube.com/watch?v=YE7VzlLtp-4",
+    "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+)
 
 
 class SourceError(ValueError):
     """Safe error text; never exposes provider responses or secrets."""
+
+    def __init__(self, message: str, *, code: str = "source_failed"):
+        super().__init__(message)
+        self.code = code
+
+
+def classify_source_error(error: Exception) -> SourceError:
+    """Map provider text to fixed messages; never echo the provider response."""
+    if isinstance(error, SourceError):
+        return error
+    message = str(error).lower()
+    if any(text in message for text in ("http error 429", "too many requests")):
+        return SourceError(
+            "The source is rate-limiting this server. Wait before trying again.",
+            code="rate_limited",
+        )
+    if any(
+        text in message
+        for text in ("sign in to confirm", "not a bot", "cookies are no longer valid")
+    ):
+        return SourceError(
+            "YouTube rejected the session or the server’s access. Export a fresh private-window YouTube session and test again; server restrictions may still apply.",
+            code="access_rejected",
+        )
+    if any(
+        text in message
+        for text in (
+            "video unavailable",
+            "video is unavailable",
+            "private video",
+            "video has been removed",
+            "not available in your country",
+        )
+    ):
+        return SourceError(
+            "This video is unavailable. Try another YouTube link.",
+            code="video_unavailable",
+        )
+    if any(
+        text in message
+        for text in (
+            "requested format is not available",
+            "challenge solving failed",
+            "no supported javascript runtime",
+        )
+    ):
+        return SourceError(
+            "The extractor could not obtain playable audio. Ask the bot operator to check yt-dlp and JavaScript support.",
+            code="extraction_failed",
+        )
+    if any(
+        text in message
+        for text in ("http error 403", "timed out", "certificate verify failed")
+    ):
+        return SourceError(
+            "The source request was blocked or failed over the network. Wait and retry; the bot operator can check the server connection.",
+            code="network_failed",
+        )
+    return SourceError(
+        "The source could not complete this request. Try another track; the owner can check the connection in /setup."
+    )
 
 
 class QuietLogger:
@@ -123,7 +189,13 @@ class MediaService:
                     data = await asyncio.to_thread(
                         self._extract, query, cookies, playlist, flat
                     )
-                except Exception:
+                except Exception as error:
+                    failure = classify_source_error(error)
+                    # A missing video does not invalidate the session or require
+                    # account-wide backoff before checking a different sample.
+                    if failure.code == "video_unavailable":
+                        self._next_request[guild_id] = time.monotonic() + 1
+                        raise failure from None
                     failures = self._failures.get(guild_id, 0) + 1
                     self._failures[guild_id] = failures
                     self._next_request[guild_id] = time.monotonic() + min(
@@ -131,9 +203,7 @@ class MediaService:
                     )
                     if source:
                         self.credentials.checked(guild_id, "youtube", revision, False)
-                    raise SourceError(
-                        "The source could not complete this request. Try another track; the owner can check the connection in /setup."
-                    ) from None
+                    raise failure from None
             self._next_request[guild_id] = time.monotonic() + 1
             self._failures.pop(guild_id, None)
             if source:
@@ -172,15 +242,34 @@ class MediaService:
         if not source:
             raise SourceError(f"{provider.title()} is not configured for this server.")
         revision = source["revision"]
+        failure_message = "The connection check failed. Check the credentials and try again; source restrictions may also apply."
         try:
             if provider == "youtube":
-                data = await self.extract(guild_id, YOUTUBE_TEST_URL)
+                for index, url in enumerate(YOUTUBE_TEST_URLS):
+                    try:
+                        data = await self.extract(guild_id, url)
+                        break
+                    except SourceError as error:
+                        if (
+                            error.code != "video_unavailable"
+                            or index == len(YOUTUBE_TEST_URLS) - 1
+                        ):
+                            raise
                 success = bool(data and data.get("url"))
+                if not success:
+                    failure_message = "YouTube returned no playable audio for the sample. Try /play with another video."
             elif provider == "spotify":
                 resolver = self.spotify(guild_id)
                 success = await asyncio.to_thread(resolver.test_connection)
             else:
                 raise SourceError("Unknown source.")
+        except SourceError as error:
+            success = False
+            failure_message = (
+                "The connection-test videos are unavailable. Try /play with another YouTube link; the bot operator can update the samples."
+                if error.code == "video_unavailable"
+                else str(error)
+            )
         except Exception:
             success = False
         if self.credentials.revision(guild_id, provider) != revision:
@@ -197,5 +286,5 @@ class MediaService:
                 else "Spotify accepted this server’s application credentials."
             )
             if success
-            else "The connection check failed. Check the credentials and try again; source restrictions may also apply.",
+            else failure_message,
         }
