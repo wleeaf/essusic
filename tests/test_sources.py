@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import io
 import os
 import tempfile
 import time
@@ -70,6 +71,48 @@ class CredentialTests(unittest.TestCase):
             "#HttpOnly_",
             validate_cookies(COOKIES.replace(".youtube.com", "#HttpOnly_.youtube.com")),
         )
+
+    def test_fractional_expiry_is_normalized_for_ytdlp_without_changing_cookies(self):
+        from yt_dlp.cookies import YoutubeDLCookieJar
+
+        expiry = int(time.time()) + 3600
+        exported = COOKIES.replace("\t0\t", f"\t{expiry}.123456\t").replace(
+            ".youtube.com", "#HttpOnly_.youtube.com"
+        )
+        normalized = validate_cookies(exported)
+        self.assertEqual(normalized, exported.replace(f"{expiry}.123456", str(expiry)))
+        jar = YoutubeDLCookieJar(io.StringIO(normalized))
+        jar.load(ignore_discard=True, ignore_expires=True)
+        cookie = next(iter(jar))
+        self.assertEqual(cookie.expires, expiry)
+        self.assertEqual(cookie.value, "guild-one-secret")
+        self.assertEqual(cookie.domain, ".youtube.com")
+        self.assertTrue(cookie.secure)
+
+    def test_fractional_expired_values_cannot_become_session_cookies(self):
+        for expiry in ("0.5", "1.999999", str(int(time.time()) - 10) + ".9"):
+            with (
+                self.subTest(expiry=expiry),
+                self.assertRaisesRegex(CredentialError, "unexpired"),
+            ):
+                validate_cookies(COOKIES.replace("\t0\t", f"\t{expiry}\t"))
+        self.assertEqual(validate_cookies(COOKIES.replace("\t0\t", "\t0.0\t")), COOKIES)
+
+    def test_malformed_or_unbounded_expiry_is_rejected(self):
+        for expiry in (
+            "NaN",
+            "Infinity",
+            "-1",
+            "1e12",
+            "1.2.3",
+            "9999999999999",
+            "0." + "1" * 21,
+        ):
+            with (
+                self.subTest(expiry=expiry),
+                self.assertRaisesRegex(CredentialError, "invalid entry"),
+            ):
+                validate_cookies(COOKIES.replace("\t0\t", f"\t{expiry}\t"))
 
     def test_status_never_exposes_secrets_and_stale_test_cannot_mark_new_source_ready(
         self,

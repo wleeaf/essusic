@@ -167,6 +167,20 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertIsNone(self.store.source(1, "youtube"))
 
+    async def test_cookie_upload_accepts_browser_fractional_timestamps(self):
+        await self.login()
+        expiry = int(time.time()) + 3600
+        exported = COOKIES.replace("\t0\t", f"\t{expiry}.123456\t")
+        response = await self.client.put(
+            "/setup/sources/youtube", json={"cookies": exported}, headers=self.headers
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            self.store.source(1, "youtube")["cookies"],
+            COOKIES.replace("\t0\t", f"\t{expiry}\t"),
+        )
+        self.assertNotIn("guild-one-secret", await response.text())
+
     async def test_bad_requests_are_safe_and_bounded(self):
         await self.login()
         for body in (

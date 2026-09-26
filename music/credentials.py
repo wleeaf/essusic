@@ -9,6 +9,7 @@ import re
 import secrets
 import tempfile
 import time
+from decimal import Decimal
 from pathlib import Path
 
 from nacl.exceptions import CryptoError
@@ -62,17 +63,22 @@ def validate_cookies(text: str) -> str:
             or secure not in {"TRUE", "FALSE"}
             or domain.startswith(".") != (subdomains == "TRUE")
             or not path.startswith("/")
-            or not expiry.isdigit()
-            or len(expiry) > 12
+            or not re.fullmatch(r"[0-9]{1,12}(?:\.[0-9]{1,20})?", expiry)
             or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
             or any(ord(c) < 32 or ord(c) == 127 for c in value)
         ):
             raise CredentialError("The cookie file contains an invalid entry.")
-        if int(expiry) and int(expiry) <= time.time():
+        expires_at = Decimal(expiry)
+        if expires_at and expires_at <= time.time():
             continue
         if name in AUTH_COOKIES and value:
             authenticated = True
-        cleaned.append(line)
+        # Browser exporters can retain fractional epoch seconds. yt-dlp's
+        # Netscape loader requires integer seconds; round down without ever
+        # turning an expired fractional timestamp into a session cookie.
+        entry[4] = str(int(expires_at))
+        prefix = "#HttpOnly_" if line.startswith("#HttpOnly_") else ""
+        cleaned.append(prefix + "\t".join(entry))
         if len(cleaned) > 251:
             raise CredentialError("The cookie file contains too many entries.")
     if not authenticated:
