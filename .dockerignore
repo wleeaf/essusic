@@ -14,3 +14,6 @@ data/
 .codex/
 .pytest_cache/
 .ruff_cache/
+
+# Host-specific proxy/network configuration
+compose.host.yml

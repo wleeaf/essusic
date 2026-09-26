@@ -194,7 +194,7 @@ docker compose -f docker-compose.yml -f compose.web.yml logs -f bot
 
 The overlay binds HTTP to **127.0.0.1:8080 on the host** and sets the listener inside the container to `0.0.0.0:8080`. Use a host reverse proxy for public HTTPS, or the SSH tunnel above for private setup. The base Compose file alone does not publish ports. `./data` is mounted at `/data`; leave `DATA_DIR` unset in `.env` to use that mount.
 
-`deploy.sh <ssh-host>` updates an existing checkout at `/opt/essusic` and rebuilds with the web overlay. The target owns its `.env`, encryption key and stored data. The script does not export or copy browser cookies.
+`deploy.sh <ssh-host>` updates an existing checkout at `/opt/essusic` and rebuilds with the web overlay. The target owns its `.env`, encryption key and stored data. The script does not export or copy browser cookies. If present, it includes the ignored `compose.host.yml` overlay for host-specific proxy networking. For a containerized proxy, use this overlay to attach the bot to the proxy’s external Docker network and route HTTPS to its network alias on port 8080. Keep this overlay on the host; it is excluded from Git and the image.
 
 ### Credential lifecycle and migration
 

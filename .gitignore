@@ -49,3 +49,6 @@ cookies.txt
 service-account*.json
 *-firebase-adminsdk-*.json
 .DS_Store
+
+# Host-specific proxy/network configuration
+compose.host.yml
