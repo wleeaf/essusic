@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 
@@ -13,6 +12,7 @@ log = logging.getLogger("essusic")
 
 class Essusic(commands.AutoShardedBot):
     def __init__(self) -> None:
+        self._web_runner = None
         intents = discord.Intents.default()
         super().__init__(command_prefix="!", intents=intents)
 
@@ -43,12 +43,18 @@ class Essusic(commands.AutoShardedBot):
         if web_port:
             try:
                 from web.app import start_web_server
-                await start_web_server(self, int(web_port))
+                self._web_runner = await start_web_server(self, int(web_port))
                 log.info("Web dashboard started on :%s", web_port)
             except ImportError:
                 log.info("aiohttp not available — web dashboard disabled")
             except Exception as exc:
                 log.warning("Failed to start web dashboard: %s", exc)
+
+    async def close(self) -> None:
+        if self._web_runner is not None:
+            await self._web_runner.cleanup()
+            self._web_runner = None
+        await super().close()
 
     async def on_ready(self) -> None:
         guild_count = len(self.guilds)

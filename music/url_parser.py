@@ -1,5 +1,6 @@
 import re
 from enum import Enum, auto
+from urllib.parse import parse_qs, urlsplit
 
 
 class InputType(Enum):
@@ -13,18 +14,6 @@ class InputType(Enum):
     RADIO_STREAM = auto()
     SEARCH_QUERY = auto()
 
-
-_YOUTUBE_RE = re.compile(
-    r"(?:https?://)?(?:(?:www|m|music)\.)?(?:youtube\.com|youtu\.be)/?\S+"
-)
-
-_SPOTIFY_RE = re.compile(
-    r"(?:https?://)?open\.spotify\.com/(track|playlist|album)/([A-Za-z0-9]+)"
-)
-
-_SOUNDCLOUD_RE = re.compile(
-    r"(?:https?://)?(?:www\.)?soundcloud\.com/[^/]+/\S+"
-)
 
 _STREAM_RE = re.compile(
     r"(?:https?://)\S+\.(?:m3u8?|pls|aac|mp3|ogg|opus)(?:\?\S*)?"
@@ -40,28 +29,35 @@ def classify(query: str) -> tuple[InputType, str]:
     """
     query = query.strip()
 
-    m = _SPOTIFY_RE.search(query)
-    if m:
-        kind, spotify_id = m.group(1), m.group(2)
-        type_map = {
-            "track": InputType.SPOTIFY_TRACK,
-            "playlist": InputType.SPOTIFY_PLAYLIST,
-            "album": InputType.SPOTIFY_ALBUM,
-        }
-        return type_map[kind], spotify_id
+    try:
+        parsed = urlsplit(query if "://" in query else "https://" + query)
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return InputType.SEARCH_QUERY, query
+    if parsed.scheme not in ("http", "https"):
+        return InputType.SEARCH_QUERY, query
 
-    if _SOUNDCLOUD_RE.match(query):
-        if "/sets/" in query:
+    if host == "open.spotify.com":
+        match = re.fullmatch(r"/(?:intl-[^/]+/)?(track|playlist|album)/([A-Za-z0-9]+)/?", parsed.path)
+        if match:
+            kind, spotify_id = match.groups()
+            return {
+                "track": InputType.SPOTIFY_TRACK,
+                "playlist": InputType.SPOTIFY_PLAYLIST,
+                "album": InputType.SPOTIFY_ALBUM,
+            }[kind], spotify_id
+
+    if host in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}:
+        if "list" in parse_qs(parsed.query) or parsed.path.startswith("/browse/"):
+            return InputType.YOUTUBE_PLAYLIST, query
+        return InputType.YOUTUBE_URL, query
+
+    if host in {"soundcloud.com", "www.soundcloud.com"}:
+        if "/sets/" in parsed.path:
             return InputType.SOUNDCLOUD_PLAYLIST, query
         return InputType.SOUNDCLOUD_URL, query
 
-    # Check for radio/live streams before YouTube (some streams may have youtube-like domains)
-    if _STREAM_RE.match(query):
+    if _STREAM_RE.fullmatch(query):
         return InputType.RADIO_STREAM, query
-
-    if _YOUTUBE_RE.match(query):
-        if "list=" in query or "/browse/" in query:
-            return InputType.YOUTUBE_PLAYLIST, query
-        return InputType.YOUTUBE_URL, query
 
     return InputType.SEARCH_QUERY, query

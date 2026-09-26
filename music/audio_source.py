@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import discord
 import yt_dlp
+
+from .config import data_path
 
 log = logging.getLogger(__name__)
 
@@ -19,7 +21,7 @@ YTDL_OPTIONS = {
     "no_warnings": True,
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
-    "cookiefile": "/data/cookies.txt",
+    "cookiefile": str(data_path("cookies.txt")),
     "js_runtimes": {"node": {}},
 }
 
@@ -210,7 +212,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
         )
 
         results: list[TrackInfo] = []
-        for entry in data.get("entries", []) or []:
+        for entry in (data or {}).get("entries", []) or []:
             if entry is None:
                 continue
             url = entry.get("webpage_url") or entry.get("url", "")
@@ -245,7 +247,7 @@ class CrossfadeSource(discord.AudioSource):
         incoming: discord.AudioSource,
         crossfade_seconds: int = 5,
     ) -> None:
-        self.outgoing = outgoing
+        self.outgoing: discord.AudioSource | None = outgoing
         self.incoming = incoming
         self.total_frames = crossfade_seconds * 50
         self.frame_count = 0
@@ -261,17 +263,17 @@ class CrossfadeSource(discord.AudioSource):
         if not out_data and not in_data:
             return b""
         if not out_data:
-            self.finished = True
+            self._finish()
             return in_data or b""
         if not in_data:
-            self.finished = True
+            self._finish()
             return b""
 
         self.frame_count += 1
         progress = min(self.frame_count / max(self.total_frames, 1), 1.0)
 
         if progress >= 1.0:
-            self.finished = True
+            self._finish()
             return in_data
 
         out_gain = 1.0 - progress
@@ -294,11 +296,15 @@ class CrossfadeSource(discord.AudioSource):
 
         return struct.pack(f"<{num_samples}h", *mixed)
 
-    def cleanup(self) -> None:
-        if hasattr(self.outgoing, "cleanup"):
+    def _finish(self) -> None:
+        self.finished = True
+        if self.outgoing is not None:
             self.outgoing.cleanup()
-        if hasattr(self.incoming, "cleanup"):
-            self.incoming.cleanup()
+            self.outgoing = None
+
+    def cleanup(self) -> None:
+        self._finish()
+        self.incoming.cleanup()
 
     def is_opus(self) -> bool:
         return False

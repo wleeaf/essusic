@@ -16,7 +16,6 @@ from discord import app_commands
 from discord.ext import commands
 
 from music.audio_source import (
-    AUDIO_FILTERS,
     EQ_PRESETS,
     CrossfadeSource,
     TrackInfo,
@@ -33,6 +32,7 @@ from music.queue_manager import (
     FavoritesManager,
     GuildQueue,
     HistoryManager,
+    LoopMode,
     PlaylistManager,
     QueueManager,
     RatingsManager,
@@ -109,7 +109,8 @@ def _check_dj(interaction: discord.Interaction, gq: GuildQueue) -> str | None:
     # Allow if user is alone with bot in VC
     if member.voice and member.voice.channel:  # type: ignore[union-attr]
         non_bot = [m for m in member.voice.channel.members if not m.bot]  # type: ignore[union-attr]
-        if len(non_bot) <= 1:
+        vc = interaction.guild.voice_client
+        if vc and member.voice.channel == vc.channel and len(non_bot) <= 1:
             return None
     role = interaction.guild.get_role(gq.dj_role_id)  # type: ignore[union-attr]
     role_name = role.name if role else "DJ"
@@ -140,21 +141,7 @@ class SearchView(discord.ui.View):
             track.requester = interaction.user.display_name
             track.requester_id = interaction.user.id
 
-            vc = await self.cog._ensure_voice(interaction)
-            if vc is None:
-                return
-
-            if vc.is_playing() or vc.is_paused():
-                gq = self.cog.queues.get(interaction.guild.id)  # type: ignore[union-attr]
-                # Prepend track and stop current — _play_next will pick it up immediately
-                gq.queue.appendleft(track)
-                gq._restarting = True
-                vc.stop()
-                gq._restarting = False
-                await self.cog._play_next(interaction.guild)  # type: ignore[arg-type]
-                await interaction.followup.send(f"Now playing: **{track.title}**")
-            else:
-                await self.cog._enqueue_and_play(interaction, track)
+            await self.cog._enqueue_and_play(interaction, track)
 
         return callback
 
@@ -240,8 +227,8 @@ class VoteSkipView(discord.ui.View):
             )
             self.stop()
             vc: Optional[discord.VoiceClient] = self.guild.voice_client  # type: ignore[assignment]
-            if vc and vc.is_playing():
-                vc.stop()
+            if vc and (vc.is_playing() or vc.is_paused()):
+                self.cog._skip(self.guild)
         else:
             await interaction.response.edit_message(view=self)
 
@@ -365,6 +352,12 @@ class PlayerView(discord.ui.View):
         self.message: discord.Message | None = None
         self._update_task: asyncio.Task | None = None
         self._build_seek_bar()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if err := _check_dj(interaction, self.cog.queues.get(self.guild.id)):
+            await interaction.response.send_message(err, ephemeral=True)
+            return False
+        return True
 
     # ── Clickable seek bar (row 1) ────────────────────────────────────────
 
@@ -523,7 +516,7 @@ class PlayerView(discord.ui.View):
         gq.queue.appendleft(track)
         gq.current = None
         if vc:
-            vc.stop()  # _play_next will handle player update via _send_player
+            self.cog._skip(self.guild)
         await interaction.response.defer()
 
     @discord.ui.button(emoji="\u23ea", style=discord.ButtonStyle.secondary, row=0)
@@ -550,9 +543,9 @@ class PlayerView(discord.ui.View):
             await interaction.response.send_message("Not connected.", ephemeral=True)
             return
         if vc.is_paused():
-            vc.resume()
+            self.cog._resume(self.guild)
         elif vc.is_playing():
-            vc.pause()
+            self.cog._pause(self.guild)
         else:
             await interaction.response.send_message("❌ Nothing is playing. Use `/play` to queue a track.", ephemeral=True)
             return
@@ -589,7 +582,7 @@ class PlayerView(discord.ui.View):
         if vc is None or (not vc.is_playing() and not vc.is_paused()):
             await interaction.response.send_message("❌ Nothing is playing. Use `/play` to queue a track.", ephemeral=True)
             return
-        vc.stop()  # _play_next will handle player update via _send_player
+        self.cog._skip(self.guild)
         await interaction.response.defer()
 
     # Row 2: volume controls
@@ -876,6 +869,7 @@ class MusicCog(commands.Cog):
         self.ratings = RatingsManager()
         self._active_players: dict[int, PlayerView] = {}
         self._crossfade_timers: dict[int, asyncio.TimerHandle] = {}
+        self._play_locks: dict[int, asyncio.Lock] = {}
         self._playing_guilds: set[int] = set()  # guilds currently playing audio
 
     # ── helpers ──────────────────────────────────────────────────────────
@@ -890,9 +884,34 @@ class MusicCog(commands.Cog):
 
     def _get_elapsed(self, gq: GuildQueue) -> int:
         """Get elapsed playback time in seconds, accounting for speed."""
-        if not gq.play_start_time:
-            return 0
-        return int((time.time() - gq.play_start_time) * gq.speed)
+        return gq.elapsed()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Use music commands in a server.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _pause(self, guild: discord.Guild) -> None:
+        guild.voice_client.pause()
+        self.queues.get(guild.id).pause_clock()
+        self._cancel_crossfade_timer(guild.id)
+
+    def _resume(self, guild: discord.Guild) -> None:
+        guild.voice_client.resume()
+        self.queues.get(guild.id).resume_clock()
+        self._schedule_crossfade(guild)
+
+    def _skip(self, guild: discord.Guild) -> None:
+        gq = self.queues.get(guild.id)
+        # A manual skip must advance even when single-track looping is enabled.
+        if gq.loop_mode == LoopMode.SINGLE:
+            gq.previous = gq.current
+            gq.current = None
+        self._cancel_crossfade_timer(guild.id)
+        guild.voice_client.stop()
 
     async def _ensure_voice(
         self, interaction: discord.Interaction
@@ -935,9 +954,6 @@ class MusicCog(commands.Cog):
     def _after_play(self, guild: discord.Guild, error: Exception | None) -> None:
         if error:
             log.error("Playback error in guild %s: %s", guild.id, error)
-        gq = self.queues.get(guild.id)
-        if gq._restarting:
-            return  # restart handles its own playback
         asyncio.run_coroutine_threadsafe(self._play_next(guild), self.bot.loop)
 
     async def _notify_text_channel(self, guild: discord.Guild, msg: str) -> None:
@@ -951,17 +967,23 @@ class MusicCog(commands.Cog):
                 except discord.HTTPException:
                     pass
 
-    async def _play_next(self, guild: discord.Guild, _fail_count: int = 0) -> None:
+    async def _play_next(self, guild: discord.Guild) -> None:
+        lock = self._play_locks.setdefault(guild.id, asyncio.Lock())
+        async with lock:
+            await self._play_next_unlocked(guild)
+
+    async def _play_next_unlocked(self, guild: discord.Guild, _fail_count: int = 0) -> None:
         gq = self.queues.get(guild.id)
         vc: Optional[discord.VoiceClient] = guild.voice_client  # type: ignore[assignment]
         if vc is None:
             gq.clear()
             return
 
-        # Guard against stale callbacks from _restart_playback race
+        # Ignore duplicate callbacks while a track is already active.
         if vc.is_playing() or vc.is_paused():
             return
 
+        self._cancel_crossfade_timer(guild.id)
         track = gq.next_track()
         if track is None:
             # Radio mode: continuously queue similar tracks
@@ -1034,15 +1056,26 @@ class MusicCog(commands.Cog):
                     guild, "Too many consecutive playback failures. Stopping."
                 )
                 return
-            await self._play_next(guild, _fail_count + 1)
+            # Do not retry a failed track forever in a loop mode.
+            gq.current = None
+            await self._play_next_unlocked(guild, _fail_count + 1)
             return
 
+        if guild.voice_client is not vc or gq.current is not track or not vc.is_connected():
+            source.cleanup()
+            return
+
+        # Spotify/search entries may not have duration or artwork until resolved.
+        track.duration = source.duration or track.duration
+        track.thumbnail = source.thumbnail or track.thumbnail
+        track.is_live = track.is_live or bool(source._data.get("is_live"))
         tracks_played_total.inc()
         if guild.id not in self._playing_guilds:
             self._playing_guilds.add(guild.id)
             metric_active_players.inc()
         metric_queue_size.labels(guild_id=str(guild.id)).set(len(gq.queue))
         gq.play_start_time = time.time()
+        gq.paused_at = None
         self.history.record(
             guild.id, track,
             requester_id=track.requester_id,
@@ -1052,19 +1085,7 @@ class MusicCog(commands.Cog):
         vc.play(source, after=lambda e: self._after_play(guild, e))
         await self._update_presence(track)
 
-        # Schedule crossfade if enabled and track has known duration
-        self._cancel_crossfade_timer(guild.id)
-        if (
-            gq.crossfade_seconds > 0
-            and track.duration > 0
-            and not track.is_live
-            and gq.queue
-        ):
-            delay = max(0, (track.duration / gq.speed) - gq.crossfade_seconds)
-            handle = self.bot.loop.call_later(
-                delay, lambda: asyncio.ensure_future(self._start_crossfade(guild))
-            )
-            self._crossfade_timers[guild.id] = handle
+        self._schedule_crossfade(guild)
 
         # Auto-send/refresh the player view in the text channel
         await self._send_player(guild, gq)
@@ -1170,6 +1191,20 @@ class MusicCog(commands.Cog):
         if handle:
             handle.cancel()
 
+    def _schedule_crossfade(self, guild: discord.Guild) -> None:
+        self._cancel_crossfade_timer(guild.id)
+        gq = self.queues.get(guild.id)
+        vc = guild.voice_client
+        if (vc is None or not vc.is_playing() or not gq.current
+                or gq.current.is_live or gq.current.duration <= 0
+                or not gq.queue or gq.crossfade_seconds <= 0
+                or gq.loop_mode == LoopMode.SINGLE):
+            return
+        delay = max(0, (gq.current.duration - gq.elapsed()) / gq.speed - gq.crossfade_seconds)
+        self._crossfade_timers[guild.id] = self.bot.loop.call_later(
+            delay, lambda: asyncio.ensure_future(self._start_crossfade(guild))
+        )
+
     async def _start_crossfade(self, guild: discord.Guild) -> None:
         """Begin crossfade from current track to next."""
         gq = self.queues.get(guild.id)
@@ -1177,6 +1212,10 @@ class MusicCog(commands.Cog):
         if vc is None or not vc.is_playing() or not gq.queue:
             return
 
+        if gq.crossfade_seconds <= 0 or gq.loop_mode == LoopMode.SINGLE:
+            return
+        current_track = gq.current
+        current_source = vc.source
         next_track = gq.queue[0]
         try:
             incoming = await YTDLSource.from_query(
@@ -1196,7 +1235,11 @@ class MusicCog(commands.Cog):
             vc is None
             or not vc.is_playing()
             or not gq.queue
-            or gq.queue[0].url != next_track.url
+            or gq.queue[0] is not next_track
+            or gq.current is not current_track
+            or vc.source is not current_source
+            or gq.crossfade_seconds <= 0
+            or gq.loop_mode == LoopMode.SINGLE
         ):
             incoming.cleanup()
             return
@@ -1206,17 +1249,24 @@ class MusicCog(commands.Cog):
             incoming.cleanup()
             return
 
+        # Transfer source ownership to the mixer without stopping the player:
+        # stopping would clean up the outgoing FFmpeg process in the audio thread.
+        if isinstance(outgoing, discord.PCMVolumeTransformer):
+            outgoing.volume = 1.0
+        incoming.volume = 1.0
         xfade = CrossfadeSource(outgoing, incoming, gq.crossfade_seconds)
-        xfade_vol = discord.PCMVolumeTransformer(xfade, volume=gq.volume)
-
-        gq._restarting = True
-        vc.stop()
+        vc.source = discord.PCMVolumeTransformer(xfade, volume=gq.volume)
 
         # Advance queue
         gq.previous = gq.current
         gq.current = gq.queue.popleft()
+        if gq.loop_mode == LoopMode.QUEUE and gq.previous:
+            gq.queue.append(gq.previous)
+        gq.current.duration = incoming.duration or gq.current.duration
+        gq.current.thumbnail = incoming.thumbnail or gq.current.thumbnail
         gq.skip_votes.clear()
         gq.play_start_time = time.time()
+        gq.paused_at = None
         self.history.record(
             guild.id, gq.current,
             requester_id=gq.current.requester_id,
@@ -1224,17 +1274,11 @@ class MusicCog(commands.Cog):
         )
         self.queues.save_queue_state(guild.id)
 
-        vc.play(xfade_vol, after=lambda e: self._after_play(guild, e))
-        gq._restarting = False
+        tracks_played_total.inc()
         await self._update_presence(gq.current)
-
-        # Schedule next crossfade
-        if gq.crossfade_seconds > 0 and gq.current.duration > 0 and gq.queue:
-            delay = max(0, (gq.current.duration / gq.speed) - gq.crossfade_seconds)
-            handle = self.bot.loop.call_later(
-                delay, lambda: asyncio.ensure_future(self._start_crossfade(guild))
-            )
-            self._crossfade_timers[guild.id] = handle
+        self._schedule_crossfade(guild)
+        await self._send_player(guild, gq)
+        await self._update_np_channel(guild, gq)
 
     async def _restart_playback(
         self, guild: discord.Guild, seek_seconds: int = 0
@@ -1255,9 +1299,7 @@ class MusicCog(commands.Cog):
             stream_url = current_source.stream_url
             data = current_source._data
 
-        gq._restarting = True
-        vc.stop()
-
+        track = gq.current
         if stream_url:
             source = YTDLSource.from_stream_url(
                 stream_url,
@@ -1283,9 +1325,21 @@ class MusicCog(commands.Cog):
                 is_live=is_live,
             )
 
-        gq.play_start_time = time.time() - (seek_seconds / gq.speed)
-        vc.play(source, after=lambda e: self._after_play(guild, e))
-        gq._restarting = False
+        if (guild.voice_client is not vc or gq.current is not track
+                or vc.source is not current_source
+                or not (vc.is_playing() or vc.is_paused())):
+            source.cleanup()
+            return
+        was_paused = vc.is_paused()
+        vc.source = source
+        if was_paused:
+            vc.pause()
+        if current_source:
+            current_source.cleanup()
+        now = time.time()
+        gq.play_start_time = now - (seek_seconds / gq.speed)
+        gq.paused_at = now if was_paused else None
+        self._schedule_crossfade(guild)
 
     async def _enqueue_and_play(
         self, interaction: discord.Interaction, track: TrackInfo, *, play_next: bool = False
@@ -1363,6 +1417,7 @@ class MusicCog(commands.Cog):
         # Duplicate detection
         is_dup = gq.has_duplicate(track)
         pos = gq.add(track)
+        self._schedule_crossfade(interaction.guild)
         self.queues.save_queue_state(interaction.guild.id)  # type: ignore[union-attr]
 
         if pos is None:
@@ -1745,7 +1800,7 @@ class MusicCog(commands.Cog):
 
         title = gq.current.title if gq.current else "current track"
         next_up = gq.queue[0].title if gq.queue else None
-        vc.stop()  # triggers _after_play → _play_next
+        self._skip(interaction.guild)
         msg = f"Skipped **{title}**."
         if next_up:
             msg += f" Now playing **{next_up}**."
@@ -1804,20 +1859,26 @@ class MusicCog(commands.Cog):
 
     @app_commands.command(name="pause", description="Pause playback")
     async def pause(self, interaction: discord.Interaction) -> None:
+        if err := _check_dj(interaction, self.queues.get(interaction.guild.id)):
+            await interaction.response.send_message(err, ephemeral=True)
+            return
         vc: Optional[discord.VoiceClient] = interaction.guild.voice_client  # type: ignore[union-attr, assignment]
         if vc is None or not vc.is_playing():
             await interaction.response.send_message("❌ Nothing is playing. Use `/play` to queue a track.", ephemeral=True)
             return
-        vc.pause()
+        self._pause(interaction.guild)
         await interaction.response.send_message("⏸️ Paused.")
 
     @app_commands.command(name="resume", description="Resume playback")
     async def resume(self, interaction: discord.Interaction) -> None:
+        if err := _check_dj(interaction, self.queues.get(interaction.guild.id)):
+            await interaction.response.send_message(err, ephemeral=True)
+            return
         vc: Optional[discord.VoiceClient] = interaction.guild.voice_client  # type: ignore[union-attr, assignment]
         if vc is None or not vc.is_paused():
             await interaction.response.send_message("Nothing is paused.", ephemeral=True)
             return
-        vc.resume()
+        self._resume(interaction.guild)
         await interaction.response.send_message("▶️ Resumed.")
 
     @app_commands.command(name="nowplaying", description="Show the currently playing track")
@@ -2211,6 +2272,9 @@ class MusicCog(commands.Cog):
 
     @app_commands.command(name="replay", description="Restart the current track from the beginning")
     async def replay(self, interaction: discord.Interaction) -> None:
+        if err := _check_dj(interaction, self.queues.get(interaction.guild.id)):
+            await interaction.response.send_message(err, ephemeral=True)
+            return
         vc: Optional[discord.VoiceClient] = interaction.guild.voice_client  # type: ignore[union-attr, assignment]
         if vc is None or (not vc.is_playing() and not vc.is_paused()):
             await interaction.response.send_message("❌ Nothing is playing. Use `/play` to queue a track.", ephemeral=True)
@@ -2223,6 +2287,9 @@ class MusicCog(commands.Cog):
 
     @app_commands.command(name="back", description="Play the previous track")
     async def back(self, interaction: discord.Interaction) -> None:
+        if err := _check_dj(interaction, self.queues.get(interaction.guild.id)):
+            await interaction.response.send_message(err, ephemeral=True)
+            return
         vc: Optional[discord.VoiceClient] = interaction.guild.voice_client  # type: ignore[union-attr, assignment]
         if vc is None:
             await interaction.response.send_message("Not connected.", ephemeral=True)
@@ -2502,7 +2569,7 @@ class MusicCog(commands.Cog):
             # Solo — just skip
             gq = self.queues.get(interaction.guild.id)  # type: ignore[union-attr]
             title = gq.current.title if gq.current else "current track"
-            vc.stop()
+            self._skip(interaction.guild)
             await interaction.response.send_message(f"Skipped **{title}**.")
             return
 
@@ -2512,11 +2579,11 @@ class MusicCog(commands.Cog):
         view.children[0].label = f"Skip (1/{required})"  # type: ignore[union-attr]
 
         if 1 >= required:
-            vc.stop()
+            self._skip(interaction.guild)
             await interaction.response.send_message("Vote skip passed! Skipping...")
             return
 
-        msg = await interaction.response.send_message(
+        await interaction.response.send_message(
             f"Vote to skip — **1/{required}** votes. Click below to vote!",
             view=view,
         )
@@ -3085,6 +3152,16 @@ class MusicCog(commands.Cog):
             await interaction.response.send_message("❌ No tracks found in that code.", ephemeral=True)
             return
 
+        if any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("u"), str) or not item["u"].strip()
+            or not isinstance(item.get("t", "Unknown"), str)
+            or type(item.get("d", 0)) is not int or item.get("d", 0) < 0
+            for item in items
+        ):
+            await interaction.response.send_message("Invalid queue code.", ephemeral=True)
+            return
+        await interaction.response.defer()
         vc = await self._ensure_voice(interaction)
         if vc is None:
             return
@@ -3271,6 +3348,7 @@ class MusicCog(commands.Cog):
             return
         gq.crossfade_seconds = seconds
         self.queues.save_settings()
+        self._schedule_crossfade(interaction.guild)
         if seconds == 0:
             self._cancel_crossfade_timer(interaction.guild.id)  # type: ignore[union-attr]
             await interaction.response.send_message("🎵 Crossfade disabled.")

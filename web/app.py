@@ -3,11 +3,13 @@
 Requires ``aiohttp`` (already a dependency for lyrics).
 Shares the same bot process — direct access to MusicCog state.
 
-Start by setting WEB_PORT env var. Discord OAuth2 requires
-DISCORD_CLIENT_SECRET and WEB_BASE_URL env vars.
+Set WEB_PORT and WEB_API_TOKEN to enable the API. The token grants access to
+all bot guilds; this is an operator API, not a Discord user dashboard.
 """
 from __future__ import annotations
 
+import hmac
+import json
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -20,21 +22,44 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 routes = web.RouteTableDef()
+BOT_KEY = web.AppKey("bot", object)
+TOKEN_KEY = web.AppKey("api_token", str)
 
 
 def _get_cog(request: web.Request):
-    bot: commands.Bot = request.app["bot"]
+    bot: commands.Bot = request.app[BOT_KEY]
     cog = bot.get_cog("MusicCog")
     if cog is None:
         raise web.HTTPServiceUnavailable(text="MusicCog not loaded")
     return cog
 
 
+@web.middleware
+async def require_token(request: web.Request, handler):
+    if request.path != "/health":
+        supplied = request.headers.get("Authorization", "")
+        expected = f"Bearer {request.app[TOKEN_KEY]}"
+        if not hmac.compare_digest(supplied.encode(), expected.encode()):
+            raise web.HTTPUnauthorized(text="A valid bearer token is required")
+    return await handler(request)
+
+
+def _get_guild(request: web.Request):
+    try:
+        guild_id = int(request.match_info["guild_id"])
+    except ValueError:
+        raise web.HTTPBadRequest(text="Invalid guild ID")
+    guild = request.app[BOT_KEY].get_guild(guild_id)
+    if guild is None:
+        raise web.HTTPNotFound(text="Guild not found")
+    return guild
+
+
 # ── Health ───────────────────────────────────────────────────────────────
 
 @routes.get("/health")
 async def health(request: web.Request) -> web.Response:
-    bot = request.app["bot"]
+    bot = request.app[BOT_KEY]
     return web.json_response({
         "status": "ok",
         "guilds": len(bot.guilds),
@@ -47,7 +72,7 @@ async def health(request: web.Request) -> web.Response:
 @routes.get("/api/guilds/{guild_id}/queue")
 async def get_queue(request: web.Request) -> web.Response:
     cog = _get_cog(request)
-    guild_id = int(request.match_info["guild_id"])
+    guild_id = _get_guild(request).id
     gq = cog.queues.get(guild_id)
 
     def _track(t):
@@ -69,14 +94,14 @@ async def get_queue(request: web.Request) -> web.Response:
 @routes.post("/api/guilds/{guild_id}/skip")
 async def skip(request: web.Request) -> web.Response:
     cog = _get_cog(request)
-    guild_id = int(request.match_info["guild_id"])
-    bot = request.app["bot"]
+    guild_id = _get_guild(request).id
+    bot = request.app[BOT_KEY]
     guild = bot.get_guild(guild_id)
     if guild is None:
         raise web.HTTPNotFound(text="Guild not found")
     vc = guild.voice_client
-    if vc and vc.is_playing():
-        vc.stop()
+    if vc and (vc.is_playing() or vc.is_paused()):
+        cog._skip(guild)
         return web.json_response({"status": "skipped"})
     raise web.HTTPBadRequest(text="Nothing is playing")
 
@@ -84,16 +109,19 @@ async def skip(request: web.Request) -> web.Response:
 @routes.post("/api/guilds/{guild_id}/volume")
 async def set_volume(request: web.Request) -> web.Response:
     cog = _get_cog(request)
-    guild_id = int(request.match_info["guild_id"])
-    body = await request.json()
-    level = body.get("level", 50)
-    if not 1 <= level <= 100:
+    guild_id = _get_guild(request).id
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise web.HTTPBadRequest(text="Invalid JSON body")
+    level = body.get("level") if isinstance(body, dict) else None
+    if type(level) is not int or not 1 <= level <= 100:
         raise web.HTTPBadRequest(text="Volume must be 1-100")
 
     gq = cog.queues.get(guild_id)
     gq.volume = level / 100
 
-    bot = request.app["bot"]
+    bot = request.app[BOT_KEY]
     guild = bot.get_guild(guild_id)
     if guild:
         vc = guild.voice_client
@@ -107,7 +135,7 @@ async def set_volume(request: web.Request) -> web.Response:
 @routes.get("/api/guilds/{guild_id}/playlists")
 async def get_playlists(request: web.Request) -> web.Response:
     cog = _get_cog(request)
-    guild_id = int(request.match_info["guild_id"])
+    guild_id = _get_guild(request).id
     playlists = cog.playlists.list_all(guild_id)
     result = []
     for pl in playlists:
@@ -122,7 +150,7 @@ async def get_playlists(request: web.Request) -> web.Response:
 @routes.get("/api/guilds/{guild_id}/stats")
 async def get_stats(request: web.Request) -> web.Response:
     cog = _get_cog(request)
-    guild_id = int(request.match_info["guild_id"])
+    guild_id = _get_guild(request).id
     data = cog.history.server_stats(guild_id)
     # Convert Counter tuples to serializable format
     data["top_tracks"] = [{"title": t, "count": c} for t, c in data["top_tracks"]]
@@ -130,40 +158,26 @@ async def get_stats(request: web.Request) -> web.Response:
     return web.json_response(data)
 
 
-# ── OAuth2 (stubs for future frontend) ──────────────────────────────────
-
-@routes.get("/auth/login")
-async def auth_login(request: web.Request) -> web.Response:
-    client_id = os.getenv("DISCORD_CLIENT_ID")
-    base_url = os.getenv("WEB_BASE_URL", "http://localhost:8080")
-    if not client_id:
-        raise web.HTTPServiceUnavailable(text="DISCORD_CLIENT_ID not set")
-    redirect_uri = f"{base_url}/auth/callback"
-    url = (
-        f"https://discord.com/api/oauth2/authorize"
-        f"?client_id={client_id}&redirect_uri={redirect_uri}"
-        f"&response_type=code&scope=identify+guilds"
-    )
-    raise web.HTTPFound(url)
-
-
-@routes.get("/auth/callback")
-async def auth_callback(request: web.Request) -> web.Response:
-    code = request.query.get("code")
-    if not code:
-        raise web.HTTPBadRequest(text="Missing code parameter")
-    # TODO: Exchange code for token, create session
-    return web.json_response({"status": "not_implemented", "code": code})
-
-
 # ── Server lifecycle ─────────────────────────────────────────────────────
 
-async def start_web_server(bot: commands.Bot, port: int = 8080) -> web.AppRunner:
-    app = web.Application()
-    app["bot"] = bot
+def create_app(bot: commands.Bot, token: str) -> web.Application:
+    if not token or not token.strip():
+        raise ValueError("WEB_API_TOKEN must be set to enable the web API")
+    app = web.Application(middlewares=[require_token])
+    app[BOT_KEY] = bot
+    app[TOKEN_KEY] = token
     app.router.add_routes(routes)
+    return app
+
+
+async def start_web_server(bot: commands.Bot, port: int = 8080) -> web.AppRunner:
+    app = create_app(bot, os.getenv("WEB_API_TOKEN", ""))
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
+    try:
+        site = web.TCPSite(runner, os.getenv("WEB_HOST", "127.0.0.1"), port)
+        await site.start()
+    except Exception:
+        await runner.cleanup()
+        raise
     return runner

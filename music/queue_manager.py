@@ -5,11 +5,14 @@ import logging
 import os
 import random
 import re
+import time
+from dataclasses import asdict
 from collections import Counter, deque
 from enum import Enum, auto
 from pathlib import Path
 
 from .audio_source import TrackInfo
+from .config import data_path
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +66,7 @@ class GuildQueue:
         self.search_mode: str = "youtube"
         self.max_queue: int = 50
         self.play_start_time: float = 0.0
+        self.paused_at: float | None = None
         self.autoplay: bool = False
         self.filter_name: str | None = None
         self.previous: TrackInfo | None = None
@@ -71,7 +75,6 @@ class GuildQueue:
         self.speed: float = 1.0
         self.normalize: bool = False
         self.text_channel_id: int | None = None
-        self._restarting: bool = False
         self.skip_votes: set[int] = set()
 
         # EQ
@@ -102,6 +105,21 @@ class GuildQueue:
         # Per-user queue limit (0 = unlimited)
         self.max_per_user: int = 0
 
+    def elapsed(self) -> int:
+        if not self.play_start_time:
+            return 0
+        now = self.paused_at if self.paused_at is not None else time.time()
+        return max(0, int((now - self.play_start_time) * self.speed))
+
+    def pause_clock(self) -> None:
+        if self.paused_at is None:
+            self.paused_at = time.time()
+
+    def resume_clock(self) -> None:
+        if self.paused_at is not None:
+            self.play_start_time += time.time() - self.paused_at
+            self.paused_at = None
+
     def add(self, track: TrackInfo) -> int | None:
         """Add a track and return its position (1-indexed), or None if queue is full."""
         if len(self.queue) >= self.max_queue:
@@ -115,7 +133,8 @@ class GuildQueue:
         if self.loop_mode == LoopMode.SINGLE and self.current is not None:
             return self.current
 
-        self.previous = self.current
+        if self.current is not None:
+            self.previous = self.current
 
         if self.loop_mode == LoopMode.QUEUE and self.current is not None:
             self.queue.append(self.current)
@@ -218,7 +237,7 @@ class GuildQueue:
         self.skip_votes.clear()
         self.pending_requests.clear()
         self.play_start_time = 0.0
-        self._restarting = False
+        self.paused_at = None
         self._undo_stack.clear()
         self.np_message_id = None  # runtime-only, reset when queue is cleared
 
@@ -243,18 +262,19 @@ _SETTINGS_KEYS = (
     "volume", "search_mode", "max_queue", "autoplay", "filter_name",
     "dj_role_id", "stay_connected", "speed", "normalize", "loop_mode",
     "eq_bands", "crossfade_seconds", "locale", "np_channel_id", "max_per_user",
+    "dj_queue_mode",
 )
 
 
 class QueueManager:
     """Holds per-guild queues."""
 
-    def __init__(self, settings_path: str = "/data/settings.json") -> None:
+    def __init__(self, settings_path: str | Path | None = None) -> None:
         self._guilds: dict[int, GuildQueue] = {}
-        self._settings_path = Path(settings_path)
+        self._settings_path = Path(settings_path) if settings_path is not None else data_path("settings.json")
         self._settings: dict[str, dict] = {}
         self._load_settings()
-        self._queue_state_path = Path("/data/queue_state.json")
+        self._queue_state_path = self._settings_path.with_name("queue_state.json")
         self._queue_state: dict[str, dict] = {}
         if self._queue_state_path.exists():
             try:
@@ -308,16 +328,13 @@ class QueueManager:
         key = str(guild_id)
 
         def _track_dict(t: TrackInfo) -> dict:
-            return {"title": t.title, "url": t.url, "duration": t.duration,
-                    "thumbnail": t.thumbnail, "requester": t.requester}
+            return asdict(t)
 
         state: dict = {"queue": [_track_dict(t) for t in gq.queue],
                        "loop_mode": gq.loop_mode.name}
         if gq.current:
             state["current"] = _track_dict(gq.current)
-            import time
-            elapsed = int((time.time() - gq.play_start_time) * gq.speed) if gq.play_start_time else 0
-            state["elapsed"] = elapsed
+            state["elapsed"] = gq.elapsed()
         self._queue_state[key] = state
         self._write_queue_state()
 
@@ -341,11 +358,15 @@ class QueueManager:
             gq.queue.appendleft(TrackInfo(
                 title=d["title"], url=d["url"], duration=d.get("duration", 0),
                 thumbnail=d.get("thumbnail", ""), requester=d.get("requester", ""),
+                requester_id=d.get("requester_id", 0),
+                artist=d.get("artist", ""), is_live=d.get("is_live", False),
             ))
         for d in saved.get("queue", []):
             gq.queue.append(TrackInfo(
                 title=d["title"], url=d["url"], duration=d.get("duration", 0),
                 thumbnail=d.get("thumbnail", ""), requester=d.get("requester", ""),
+                requester_id=d.get("requester_id", 0),
+                artist=d.get("artist", ""), is_live=d.get("is_live", False),
             ))
         if "loop_mode" in saved:
             try:
@@ -360,8 +381,8 @@ class QueueManager:
 class HistoryManager:
     """Tracks play history per guild, capped at 500 entries."""
 
-    def __init__(self, path: str = "/data/history.json") -> None:
-        self._path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self._path = Path(path) if path is not None else data_path("history.json")
         self._data: dict[str, list[dict]] = {}
         if self._path.exists():
             try:
@@ -450,8 +471,8 @@ class HistoryManager:
 class FavoritesManager:
     """Per-user favorites, max 50 per user."""
 
-    def __init__(self, path: str = "/data/favorites.json") -> None:
-        self._path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self._path = Path(path) if path is not None else data_path("favorites.json")
         self._data: dict[str, list[dict]] = {}
         if self._path.exists():
             try:
@@ -538,8 +559,8 @@ class PlaylistManager:
     MAX_PLAYLISTS = 25
     MAX_TRACKS = 200
 
-    def __init__(self, path: str = "/data/playlists.json") -> None:
-        self._path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self._path = Path(path) if path is not None else data_path("playlists.json")
         self._data: dict[str, dict[str, dict]] = {}
         if self._path.exists():
             try:
@@ -692,8 +713,8 @@ class PlaylistManager:
 class RatingsManager:
     """Per-guild track ratings with up/down votes."""
 
-    def __init__(self, path: str = "/data/ratings.json") -> None:
-        self._path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self._path = Path(path) if path is not None else data_path("ratings.json")
         self._data: dict[str, dict[str, dict]] = {}
         if self._path.exists():
             try:

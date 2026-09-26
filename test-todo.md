@@ -23,7 +23,7 @@ Test in order — earlier sections set up state for later ones.
 
 - [ ] `/queue` — should show the current queue with track numbers
 - [ ] `/shuffle` — shuffle the queue, verify order changed
-- [ ] `/loop off` → `/loop single` → `/loop queue` — verify each mode:
+- [ ] `/loop` three times (off → single → queue) — verify each mode:
     - **single**: same track repeats
     - **queue**: after last track, loops back to first
     - **off**: stops after last track (or triggers autoplay)
@@ -42,7 +42,7 @@ Test in order — earlier sections set up state for later ones.
 - [ ] `/seek 1:30` — should seek to 1:30
 - [ ] `/seek 90` — should seek to 90 seconds
 - [ ] Player embed seek bar — click a segment, should seek to that time
-- [ ] Player embed buttons — test prev, rewind 10s, pause/resume, forward 10s, next, stop
+- [ ] Player embed buttons — test prev, rewind 10s, pause/resume, forward 10s, next
 - [ ] `/replay` — should restart the current track from the beginning
 - [ ] `/voteskip` — if alone in VC, should auto-skip. With 2+ people, should start a vote
 
@@ -115,18 +115,18 @@ Test in order — earlier sections set up state for later ones.
 
 ## 12. DJ Mode
 
-- [ ] `/dj-role set <role>` — set a DJ role
+- [ ] `/dj <role>` — set a DJ role
 - [ ] Have a non-DJ user try `/skip` — should be denied or require approval
-- [ ] `/dj-queue on` — enable DJ approval mode
+- [ ] `/djmode` — enable DJ approval mode
 - [ ] Have a non-DJ use `/play` — should send approval request to the channel
 - [ ] Approve it from a DJ account — track should be queued
-- [ ] `/dj-queue off` and `/dj-role clear` — reset
+- [ ] `/djmode` and `/djclear` — reset
 
 ## 13. Per-User Limits
 
-- [ ] `/max-per-user <number>` — set a low limit (e.g. 3)
+- [ ] `/maxperuser <number>` — set a low limit (e.g. 3)
 - [ ] Try queueing more than 3 tracks — should be rejected after the limit
-- [ ] `/max-per-user 0` — disable the limit
+- [ ] `/maxperuser 0` — disable the limit
 
 ## 14. 24/7 Mode
 
@@ -134,7 +134,7 @@ Test in order — earlier sections set up state for later ones.
 - [ ] Leave the VC — bot should stay connected
 - [ ] Rejoin — bot should still be there
 - [ ] `/24-7` — toggle off
-- [ ] Leave the VC — bot should disconnect after timeout
+- [ ] Leave the VC — bot should disconnect when left alone
 
 ## 15. Misc
 
@@ -143,9 +143,9 @@ Test in order — earlier sections set up state for later ones.
 - [ ] Bot presence — verify it shows "Listening to {track}" while playing
 - [ ] Bot presence — verify it clears when stopped
 - [ ] Play a track, let it finish, verify it auto-advances to the next queued track
-- [ ] Verify the player message **edits in-place** on track change (no new notification)
-- [ ] `/np-channel set` — set a dedicated now-playing channel, verify embeds appear there
-- [ ] `/np-channel clear` — clear it
+- [ ] Verify the player message **moves to the bottom** on track change (silent message)
+- [ ] `/setnpchannel` — set a dedicated now-playing channel, verify embeds appear there
+- [ ] `/clearnpchannel` — clear it
 
 ## 16. Edge Cases
 
