@@ -235,6 +235,7 @@ python scripts/check_setup_ui.py
 
 ## Behavior and limitations
 
+- `/play` adds to the existing queue; it does not replace the current track or tracks restored after a restart. Single-track repeat keeps the current song playing until you `/skip` or change `/loop` mode. Queue confirmations warn when repeat is holding up your request.
 - Spotify availability depends on the application's API access. Radio, autoplay, and `/similar` use related-artist/top-track endpoints; these may be unavailable under [Spotify's API restrictions](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api).
 - Recovery restores the interrupted track at the front of the queue. It does not reconnect to voice automatically or resume at the saved timestamp. `/stop` and automatic disconnect clear recovery state.
 - History retains the latest 500 playback starts per server. Listening-time statistics use track durations, rather than measuring how long each listener actually listened.

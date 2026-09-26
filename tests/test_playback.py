@@ -120,6 +120,51 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Run /setup', self.cog._notify_text_channel.await_args.args[1])
         self.assertIn('/remove 1', self.cog._notify_text_channel.await_args.args[1])
 
+    async def test_play_identifies_request_behind_restored_repeating_track(self):
+        self.vc.stop()
+        self.queue.current = None
+        self.queue.queue.clear()
+        self.queue.add(TrackInfo('Trust Me', 'https://www.youtube.com/watch?v=3LTZRDJCdbk'))
+        self.queue.loop_mode = LoopMode.SINGLE
+        self.cog._ensure_voice = AsyncMock(return_value=self.vc)
+        interaction = SimpleNamespace(
+            guild=self.guild, channel_id=123,
+            user=SimpleNamespace(id=42, display_name='Listener'),
+            response=SimpleNamespace(is_done=lambda: True),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        requested = TrackInfo('STIM - martyr', 'https://www.youtube.com/watch?v=T8z_5ts0Ft4')
+        with patch.object(YTDLSource, 'from_query', AsyncMock(return_value=source())) as fetch:
+            await self.cog._enqueue_and_play(interaction, requested)
+        self.assertEqual(fetch.await_args.args[0], 'https://www.youtube.com/watch?v=3LTZRDJCdbk')
+        self.assertIs(self.queue.queue[0], requested)
+        message = interaction.followup.send.await_args.kwargs['embed'].description
+        self.assertIn('STIM - martyr', message)
+        self.assertIn('position #1', message)
+        self.assertIn('earlier queued track: **Trust Me**', message)
+        self.assertIn('single-track repeat', message)
+        self.assertIn('/skip', message)
+
+    async def test_enqueue_warns_when_single_repeat_blocks_requested_track(self):
+        self.cog._ensure_voice = AsyncMock(return_value=self.vc)
+        self.queue.loop_mode = LoopMode.SINGLE
+        for play_next in (False, True):
+            with self.subTest(play_next=play_next):
+                interaction = SimpleNamespace(
+                    guild=self.guild, channel_id=123,
+                    user=SimpleNamespace(id=42, display_name='Listener'),
+                    response=SimpleNamespace(is_done=lambda: True),
+                    followup=SimpleNamespace(send=AsyncMock()),
+                )
+                requested = TrackInfo('STIM - martyr', 'martyr')
+                await self.cog._enqueue_and_play(interaction, requested, play_next=play_next)
+                self.assertEqual(self.queue.current.title, 'First')
+                message = interaction.followup.send.await_args.kwargs['embed'].description
+                self.assertIn('STIM - martyr', message)
+                self.assertIn('**First** is on single-track repeat', message)
+                self.assertIn('/skip', message)
+                self.assertNotIn('will play next', message)
+
     async def test_revoking_during_resolution_cannot_restore_cleared_queue(self):
         from music.providers import SourceError
         self.vc.playing = False

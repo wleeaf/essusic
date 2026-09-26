@@ -1464,7 +1464,12 @@ class MusicCog(commands.Cog):
                 return
             gq.queue.appendleft(track)
             self.queues.save_queue_state(interaction.guild.id)  # type: ignore[union-attr]
-            msg = f"⏭️ **{track.title}** will play next."
+            msg = f"⏭️ **{track.title}** is first in the queue."
+            if gq.loop_mode == LoopMode.SINGLE and gq.current:
+                msg += (
+                    f"\n**{gq.current.title}** is on single-track repeat. "
+                    "Use `/skip` to advance, or `/loop` to change repeat mode."
+                )
             if interaction.response.is_done():
                 await interaction.followup.send(embed=notice(msg, section='Playback'))
             else:
@@ -1487,14 +1492,28 @@ class MusicCog(commands.Cog):
 
         if not vc.is_playing() and not vc.is_paused():
             await self._play_next(interaction.guild)  # type: ignore[arg-type]
-            msg = (f"Now playing: **{gq.current.title}**" if vc.is_playing() and gq.current
-                   else f"Added **{track.title}**. Playback has not started; check the source message above.")
+            if vc.is_playing() and gq.current is track:
+                msg = f"Now playing: **{track.title}**"
+            elif vc.is_playing() and gq.current:
+                position = next((i for i, item in enumerate(gq.queue, 1) if item is track), None)
+                msg = f"Added **{track.title}**"
+                if position is not None:
+                    msg += f" at queue position #{position}"
+                msg += f".\nNow playing the earlier queued track: **{gq.current.title}**."
+            else:
+                msg = f"Added **{track.title}**. Playback has not started; check the source message above."
         else:
             msg = f"Queued **{track.title}** at position #{pos}"
             if is_dup:
                 msg += "\n**{title}** is already in the queue. Adding anyway.".format(
                     title=track.title
                 )
+
+        if gq.loop_mode == LoopMode.SINGLE and gq.current and gq.current is not track:
+            msg += (
+                f"\n**{gq.current.title}** is on single-track repeat. "
+                "Use `/skip` to advance, or `/loop` to change repeat mode."
+            )
 
         if interaction.response.is_done():
             await interaction.followup.send(embed=notice(msg, section='Playback'))
