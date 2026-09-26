@@ -38,17 +38,17 @@ class Essusic(commands.AutoShardedBot):
         except Exception as exc:
             log.warning("Failed to start metrics server: %s", exc)
 
-        # Start web dashboard if configured
+        # Start owner setup and the optional operator API if configured
         web_port = os.getenv("WEB_PORT")
         if web_port:
             try:
                 from web.app import start_web_server
                 self._web_runner = await start_web_server(self, int(web_port))
-                log.info("Web dashboard started on :%s", web_port)
+                log.info("Setup/API listener started on :%s", web_port)
             except ImportError:
-                log.info("aiohttp not available — web dashboard disabled")
+                log.info("aiohttp not available — setup/API listener disabled")
             except Exception as exc:
-                log.warning("Failed to start web dashboard: %s", exc)
+                log.warning("Failed to start setup/API listener: %s", exc)
 
     async def close(self) -> None:
         if self._web_runner is not None:

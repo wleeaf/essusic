@@ -1,11 +1,12 @@
 # Essusic
 
-Essusic is a self-hosted Discord music bot with slash commands, an interactive player, and separate queues for each server. It uses discord.py for voice, yt-dlp for media extraction, and FFmpeg for audio processing.
+Essusic is a Discord music bot with an interactive player, separate queues, and owner-managed music sources for every server. Invite an existing instance, run `/setup`, and connect your own YouTube session and optional Spotify application. You can also self-host the entire bot.
 
 Play YouTube and SoundCloud links, search for songs, or queue Spotify tracks, albums, and playlists. **Spotify supplies metadata; audio is found and played through YouTube**, so matches can differ from the original recording.
 
 ## Features
 
+- **Owner-run setup** — Install first, then connect sources on a private setup page; credentials are encrypted and never shared between servers
 - **Multi-source playback** — YouTube, Spotify (tracks/playlists/albums), SoundCloud, and radio streams
 - **Interactive player** — A unified violet theme, labeled transport controls, timestamp seeking, artwork, and an up-next preview; refreshed at the bottom of the channel on track changes
 - **Per-server queues** — Loop modes, smart shuffle, queue import/export, undo, and move/reorder
@@ -89,6 +90,8 @@ The gallery supports dark/light previews, compact width, help navigation, and sa
 | `/lyrics [query]` | Fetch lyrics |
 | `/grab` | DM current track info |
 | `/help` | Browse commands by category |
+| `/setup` | Owner-only source configuration and connection checks |
+| `/invite` | Generate this bot’s server installation link |
 
 ### Search
 | Command | Description |
@@ -131,17 +134,25 @@ The gallery supports dark/light previews, compact width, help navigation, and sa
 
 ## Setup
 
-### Requirements
+### For server owners
 
-- Python 3.12 or newer
-- FFmpeg on `PATH`
-- Node.js 22 or newer on `PATH` for YouTube extraction ([yt-dlp EJS requirements](https://github.com/yt-dlp/yt-dlp/wiki/EJS))
-- A Discord application with a bot token
-- Optional Spotify API credentials for Spotify search and links
+1. Invite an Essusic instance using its Discord installation link. `/invite` generates a link for the running instance.
+2. As the **server owner**, run `/setup`. Open the private link in its ephemeral response. Administrators who are not the owner cannot manage credentials.
+3. Upload a Netscape-format cookie file containing only your YouTube session. Follow [yt-dlp’s YouTube cookie export instructions](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies); do not upload a whole-browser export. Save, then test the connection.
+4. Optionally enter your own Spotify application's client ID and secret from the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard). Spotify supplies metadata; YouTube is still required for audio.
+5. Join a voice channel and use `/play`. Run `/setup` again to check, replace, or remove credentials.
 
-Invite the bot with the `bot` and `applications.commands` scopes. Give it View Channel, Send Messages, Embed Links, Attach Files, Read Message History, Connect, and Speak permissions in the channels it uses. The bot uses default gateway intents; privileged message-content access is not required. Run commands in a server and join a voice channel before `/play`.
+YouTube searches, links, playlists, and Spotify-derived playback require this server's YouTube configuration. SoundCloud and direct radio streams do not use YouTube credentials. There is no operator credential fallback, shared cookie file, or shared Spotify token cache.
 
-### Run locally
+![Essusic owner setup page](docs/setup-preview.png)
+
+*Actual setup UI with a synthetic server; [mobile preview](docs/setup-mobile-preview.png).*
+
+### Host an instance
+
+Requirements: Python 3.12+, FFmpeg, Node.js 22+ for [yt-dlp’s JavaScript support](https://github.com/yt-dlp/yt-dlp/wiki/EJS), and a Discord application/bot token. Docker includes these runtimes.
+
+In the [Discord Developer Portal](https://discord.com/developers/applications), enable **Guild Install** and configure the `bot` and `applications.commands` scopes. Grant View Channel, Send Messages, Embed Links, Attach Files, Connect, and Speak in the channels the bot uses. Enable Public Bot if other owners should install your instance, and share its installation link. Privileged message-content access is not required.
 
 ```bash
 git clone https://github.com/wleeaf/essusic.git
@@ -150,42 +161,54 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 cp .env.example .env
-# Edit .env and set DISCORD_TOKEN.
+python -c 'import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())'
+# Set DISCORD_TOKEN and paste the generated key into CREDENTIALS_KEY in .env.
+# Local setup: WEB_BASE_URL=http://localhost:8080
 python bot.py
 ```
 
-Run from the repository root. By default, settings, queues, history, favorites, playlists, ratings, and optional YouTube cookies live in `./data/`, which is created as needed. Set `DATA_DIR` to use another directory. Existing local installations that used `/data` should set `DATA_DIR=/data` or move their saved files into `./data`.
-
-### Configuration
+Keep the encryption key stable across restarts and back it up separately from `data/`. Losing it makes existing source credentials unreadable. Run from the repository root; saved settings, queues, libraries, and encrypted credentials default to `./data/`. `DATA_DIR` overrides this directory.
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `DISCORD_TOKEN` | Yes | Bot token from the [Discord Developer Portal](https://discord.com/developers/applications) |
-| `SPOTIFY_CLIENT_ID` | For Spotify | Client ID from the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) |
-| `SPOTIFY_CLIENT_SECRET` | For Spotify | Spotify client secret |
-| `DATA_DIR` | No | Storage directory; defaults to `data` locally and `/data` in the image |
-| `WEB_PORT` | No | Enables the optional HTTP API on this port |
-| `WEB_API_TOKEN` | When `WEB_PORT` is set | Secret bearer token granting operator access to all bot guilds |
-| `WEB_HOST` | No | HTTP bind address; defaults to `127.0.0.1` |
+| `DISCORD_TOKEN` | Yes | Discord bot token |
+| `CREDENTIALS_KEY` | For owner setup | Base64-encoded 32-byte encryption key, generated once |
+| `WEB_BASE_URL` | For owner setup | Browser-facing HTTPS origin, e.g. `https://music.example.com`; no path. HTTP is accepted only on localhost/loopback |
+| `WEB_PORT` | For owner setup or operator API | HTTP listener port, e.g. `8080` |
+| `WEB_HOST` | No | Listener address; defaults to `127.0.0.1` |
+| `WEB_API_TOKEN` | Only for operator API | Separate bearer token granting access to all guilds' operator endpoints |
+| `DATA_DIR` | No | Defaults to `data` locally and `/data` in Docker |
 
-For YouTube sessions that need cookies, place a Netscape-format cookie file at `data/cookies.txt` (or under `DATA_DIR`). Cookies and runtime data are excluded from Git and Docker build contexts. Cookies do not guarantee that YouTube will accept a request.
+For remote server owners, put an HTTPS reverse proxy in front of the HTTP listener and set `WEB_BASE_URL` to that exact origin. Forward the `/setup` path and its children without rewriting them; allow requests up to 256 KiB. Serve it on a dedicated origin and avoid logging request bodies, cookies, or authorization headers. Private setup links keep their initial token in the URL fragment, which is not sent in HTTP requests.
 
-### Run with Docker Compose
+For a private self-hosted instance on a remote machine, keep `WEB_BASE_URL=http://localhost:8080` and use `ssh -L 8080:127.0.0.1:8080 your-host` while opening `/setup` links in your local browser. This does not expose setup publicly.
 
-Create `.env` with the bot token, then run:
+### Docker Compose
+
+After configuring `.env`, start the bot with the web overlay:
 
 ```bash
-docker compose up -d --build
-docker compose logs -f bot
+docker compose -f docker-compose.yml -f compose.web.yml up -d --build
+docker compose -f docker-compose.yml -f compose.web.yml logs -f bot
 ```
 
-The image includes Python 3.12, FFmpeg, and Node.js 22. Compose mounts `./data` at `/data`; leave `DATA_DIR` unset in `.env` to use that mount. Back up `data/` to preserve saved playlists and settings. The Compose file does not publish HTTP or metrics ports.
+The overlay binds HTTP to **127.0.0.1:8080 on the host** and sets the listener inside the container to `0.0.0.0:8080`. Use a host reverse proxy for public HTTPS, or the SSH tunnel above for private setup. The base Compose file alone does not publish ports. `./data` is mounted at `/data`; leave `DATA_DIR` unset in `.env` to use that mount.
 
-`deploy.sh <ssh-host> [browser]` is an optional deployment helper for an **existing** checkout at `/opt/essusic` on the target. It pushes Git commits, copies YouTube cookies, pulls the remote checkout, and rebuilds the container. The target needs its own `.env`, Docker Compose, and repository access.
+`deploy.sh <ssh-host>` updates an existing checkout at `/opt/essusic` and rebuilds with the web overlay. The target owns its `.env`, encryption key and stored data. The script does not export or copy browser cookies.
+
+### Credential lifecycle and migration
+
+- Initial links are single-use and expire in 5 minutes. Browser sessions expire after 15 minutes or logout; issuing a new `/setup` link revokes this server's previous sessions. Bot restarts revoke all setup links and sessions.
+- The bot checks the current Discord owner on each setup request. It removes credentials on ownership transfer or bot removal, including reconciliation after reconnecting. New owners must configure their own sources.
+- Credentials are authenticated-encrypted in `data/credentials/<guild-id>.enc`, bound to their server, with private filesystem permissions. Browser/API responses never return stored secrets. yt-dlp cookie jars and Spotify access-token caches remain in memory for their own requests/server.
+- Removing or replacing YouTube credentials stops active YouTube playback and clears its queue. Already-running provider requests may finish, but stale YouTube extraction results cannot start playback. Deletion removes the active credential file; operators must manage retention of their own backups separately.
+- Encryption protects stored files. The running host needs the key and plaintext credentials to make provider requests; self-host if you want to control that host yourself.
+- **Upgrading:** global `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, and `data/cookies.txt` are no longer read. Configure the setup service, then have each owner run `/setup`. Remove old shared secrets and token-cache files from your deployment once migrated. Existing queues, playlists and settings remain compatible.
+- Cookies have no guaranteed one-year lifetime. They may expire, rotate, or be rejected; hosting IP restrictions still apply. The test resolves a sample video but does not verify a fixed expiry or every track. Some YouTube clients also need a [PO token](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide); this version has no PO-token upload integration.
 
 ## Optional HTTP API
 
-This is an operator JSON API, with no browser frontend or Discord OAuth login. Set both `WEB_PORT` and a strong `WEB_API_TOKEN`; without the token the HTTP server will not start. `/health` is public. All `/api` requests require `Authorization: Bearer <WEB_API_TOKEN>`.
+The operator JSON API is separate from owner setup. Set `WEB_PORT` and a strong `WEB_API_TOKEN` to enable it. Setup works without this token, in which case all `/api` requests are rejected. `/health` is public. All `/api` requests require `Authorization: Bearer <WEB_API_TOKEN>`; setup sessions do not grant operator access.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -199,6 +222,14 @@ This is an operator JSON API, with no browser frontend or Discord OAuth login. S
 The token is an operator credential, not a per-user Discord permission check. Keep the default loopback binding for local use. For container access, set `WEB_HOST=0.0.0.0` and explicitly publish the port; use HTTPS if exposing the API beyond a trusted local network.
 
 Prometheus metrics are optional: install `prometheus-client` to start a metrics listener on port 9090. Metrics are not protected by the HTTP API token.
+
+To exercise setup in a real browser using synthetic credentials and mocked providers:
+
+```bash
+python -m pip install playwright
+python -m playwright install chromium
+python scripts/check_setup_ui.py
+```
 
 ## Behavior and limitations
 
@@ -215,18 +246,22 @@ python -m unittest discover -s tests -v
 python -m compileall -q bot.py cogs music web
 ```
 
-The regression suite runs without Discord/Spotify credentials, network media access, or FFmpeg. It covers playback transitions, concurrent requests, queue recovery, URL parsing, the HTTP API, component limits, pagination, and long-content rendering. CI runs it on Python 3.12 and 3.14. Use [the manual test plan](test-todo.md) for real Discord voice playback and third-party integrations.
+The regression suite runs without Discord/Spotify credentials, network media access, or FFmpeg. It covers playback transitions, concurrent requests, queue recovery, URL parsing, server-bound encryption, provider isolation, credential revocation, owner setup sessions, CSRF checks, the operator API, and Discord component rendering. CI runs it on Python 3.12 and 3.14. Use [the manual test plan](test-todo.md) for real Discord voice playback and third-party integrations.
 
 | Location | Responsibility |
 |---|---|
 | `bot.py` | Startup, command registration, optional HTTP/metrics services |
 | `cogs/music_cog.py` | Slash commands, player UI, voice playback orchestration |
-| `music/audio_source.py` | yt-dlp extraction, FFmpeg filters, PCM crossfade |
+| `music/audio_source.py` | FFmpeg sources, filters, PCM crossfade |
+| `music/providers.py` | Guild-scoped extraction, Spotify clients, connection checks and extraction backoff |
+| `music/credentials.py` | Validated, encrypted source credentials and safe status |
 | `music/queue_manager.py` | Per-server state and JSON-backed managers |
 | `music/spotify_resolver.py` | Spotify metadata and recommendations |
 | `music/url_parser.py` | Input classification |
 | `music/config.py` | Shared storage paths |
 | `music/presentation.py` | Shared cards, typography, progress, and pagination |
 | `scripts/preview_ui.py` | Offline interface gallery generator |
-| `web/app.py` | Authenticated operator API |
+| `web/app.py` | HTTP lifecycle and authenticated operator API |
+| `web/setup.py`, `web/static/` | Owner sessions, source management and responsive setup UI |
+| `scripts/check_setup_ui.py` | Offline browser smoke checks and setup screenshots |
 | `tests/` | Automated regression tests |

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark"><title>Connect your server · Essusic</title>
+  <link rel="stylesheet" href="/setup/setup.css"><script src="/setup/setup.js" defer></script>
+</head>
+<body>
+<header class="topbar"><a class="wordmark" href="/setup" aria-label="Essusic home"><span class="mark" aria-hidden="true">≋</span> essusic<span class="label">SERVER SETUP</span></a><span class="private">Private owner session</span></header>
+<main>
+  <section class="hero"><div class="eyebrow">YOUR SERVER. YOUR SOUND.</div><h1>Make room for<br><span>good music.</span></h1><p>Connect your music sources once. Your community takes it from there.</p><div class="server"><span class="server-icon" aria-hidden="true">⌁</span><div><small>SETTING UP</small><strong id="guild-name">Opening your private session…</strong></div></div></section>
+  <div id="message" class="message" role="status" aria-live="polite" hidden></div>
+  <section id="locked" class="locked" hidden><h2>Your setup link belongs in Discord.</h2><p>Run <code>/setup</code> as the server owner and open your new private link. Links expire after 5 minutes and can be used once.</p></section>
+  <div id="workspace" hidden>
+    <nav class="steps" aria-label="Setup progress"><span class="complete"><b>✓</b> Bot installed</span><span class="active"><b>2</b> Connect sources</span><span><b>3</b> Play in Discord</span></nav>
+    <section class="source-card" aria-labelledby="youtube-heading">
+      <div class="source-top"><div class="source-name"><span class="source-icon youtube" aria-hidden="true">▶</span><div><small>PLAYBACK & SEARCH</small><h2 id="youtube-heading">YouTube</h2></div></div><span class="badge" id="youtube-state">Not connected</span></div>
+      <p class="intro">Bring your server’s own YouTube session. It also powers audio for songs discovered through Spotify.</p>
+      <div class="source-body"><div class="guide"><h3>A session, ready to go</h3><ol><li>Sign in to YouTube in a private browser window.</li><li>Follow yt-dlp’s cookie export instructions and export <strong>youtube.com only</strong> in Netscape format.</li><li>Close that private session, upload the file here, then test the connection.</li></ol><a href="https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies" target="_blank" rel="noopener noreferrer">Read the cookie export guide ↗</a><p class="hint">Cookies can expire or be rejected. There is no fixed one-year lifetime, and a successful check does not guarantee every track will play.</p></div>
+      <form id="youtube-form"><label class="file-picker" for="cookies"><span class="upload-icon" aria-hidden="true">↑</span><strong>Choose your cookie file</strong><span>Netscape .txt · up to 128 KiB</span><input id="cookies" name="cookies" type="file" accept=".txt,text/plain" required><span id="file-name">No file selected</span></label><div class="actions"><button class="primary" type="submit">Save YouTube session</button><button type="button" data-test="youtube">Test connection</button></div><p class="hint">Replacing or removing this session stops active YouTube playback and clears its queue.</p></form></div>
+      <footer class="source-footer"><span id="youtube-checked">No connection check yet</span><button class="remove" type="button" data-remove="youtube">Remove session</button></footer>
+    </section>
+    <section class="source-card" aria-labelledby="spotify-heading">
+      <div class="source-top"><div class="source-name"><span class="source-icon spotify" aria-hidden="true">≋</span><div><small>OPTIONAL · MUSIC DISCOVERY</small><h2 id="spotify-heading">Spotify</h2></div></div><span class="badge" id="spotify-state">Not connected</span></div>
+      <p class="intro">Search Spotify and queue track, album, or playlist links. YouTube provides the audio.</p>
+      <div class="source-body"><div class="guide"><h3>Use your own application</h3><p>Create an application in the Spotify Developer Dashboard, then enter its client ID and secret.</p><a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener noreferrer">Open Spotify for Developers ↗</a><p class="hint">API access depends on your application and Spotify’s current restrictions. Your Spotify account password is never needed.</p></div><form id="spotify-form"><label for="client-id">Client ID</label><input id="client-id" name="client-id" autocomplete="off" maxlength="128" required placeholder="Your application’s client ID"><label for="client-secret">Client secret</label><input id="client-secret" name="client-secret" type="password" autocomplete="new-password" maxlength="256" required placeholder="Your application’s client secret"><div class="actions"><button class="primary" type="submit">Save Spotify credentials</button><button type="button" data-test="spotify">Test connection</button></div></form></div>
+      <footer class="source-footer"><span id="spotify-checked">No connection check yet</span><button class="remove" type="button" data-remove="spotify">Remove credentials</button></footer>
+    </section>
+    <section class="finish"><div><div class="eyebrow">NEXT STOP: YOUR VOICE CHANNEL</div><h2 id="finish-title">Connect. Check. Press play.</h2><p>Join a voice channel and use <code>/play</code> in Discord. Return with <code>/setup</code> whenever your sources need attention.</p></div><button id="logout" type="button">Finish setup ↗</button></section>
+  </div>
+  <footer class="page-footer"><p>Credentials are encrypted at rest and scoped to this server. They are never reused for another server.</p><p>The host processes credentials to make source requests. Prefer to control the host too? <a href="https://github.com/wleeaf/essusic#setup" target="_blank" rel="noopener noreferrer">Self-host Essusic ↗</a></p></footer>
+</main>
+</body></html>

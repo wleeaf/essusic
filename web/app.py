@@ -1,11 +1,4 @@
-"""Embedded web dashboard API for Essusic.
-
-Requires ``aiohttp`` (already a dependency for lyrics).
-Shares the same bot process — direct access to MusicCog state.
-
-Set WEB_PORT and WEB_API_TOKEN to enable the API. The token grants access to
-all bot guilds; this is an operator API, not a Discord user dashboard.
-"""
+"""Embedded owner setup and optional bearer-authenticated operator API."""
 from __future__ import annotations
 
 import hmac
@@ -15,6 +8,8 @@ import os
 from typing import TYPE_CHECKING
 
 import aiohttp.web as web
+
+from .setup import SetupPortal, setup_security
 
 if TYPE_CHECKING:
     from discord.ext import commands
@@ -36,10 +31,10 @@ def _get_cog(request: web.Request):
 
 @web.middleware
 async def require_token(request: web.Request, handler):
-    if request.path != "/health":
+    if request.path != "/health" and request.path != "/setup" and not request.path.startswith("/setup/"):
         supplied = request.headers.get("Authorization", "")
         expected = f"Bearer {request.app[TOKEN_KEY]}"
-        if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        if not request.app[TOKEN_KEY] or not hmac.compare_digest(supplied.encode(), expected.encode()):
             raise web.HTTPUnauthorized(text="A valid bearer token is required")
     return await handler(request)
 
@@ -160,18 +155,23 @@ async def get_stats(request: web.Request) -> web.Response:
 
 # ── Server lifecycle ─────────────────────────────────────────────────────
 
-def create_app(bot: commands.Bot, token: str) -> web.Application:
-    if not token or not token.strip():
+def create_app(bot: commands.Bot, token: str, portal: SetupPortal | None = None) -> web.Application:
+    if (not token or not token.strip()) and portal is None:
         raise ValueError("WEB_API_TOKEN must be set to enable the web API")
-    app = web.Application(middlewares=[require_token])
+    app = web.Application(middlewares=[setup_security, require_token], client_max_size=256 * 1024)
     app[BOT_KEY] = bot
     app[TOKEN_KEY] = token
     app.router.add_routes(routes)
+    if portal is not None:
+        portal.register(app)
     return app
 
 
 async def start_web_server(bot: commands.Bot, port: int = 8080) -> web.AppRunner:
-    app = create_app(bot, os.getenv("WEB_API_TOKEN", ""))
+    cog = bot.get_cog("MusicCog")
+    base_url = os.getenv("WEB_BASE_URL", "")
+    portal = SetupPortal(bot, cog, base_url) if base_url else None
+    app = create_app(bot, os.getenv("WEB_API_TOKEN", ""), portal)
     runner = web.AppRunner(app)
     await runner.setup()
     try:
@@ -180,4 +180,6 @@ async def start_web_server(bot: commands.Bot, port: int = 8080) -> web.AppRunner
     except Exception:
         await runner.cleanup()
         raise
+    if portal is not None:
+        cog.setup_portal = portal
     return runner

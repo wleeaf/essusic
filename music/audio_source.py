@@ -6,22 +6,18 @@ import struct
 from dataclasses import dataclass
 
 import discord
-import yt_dlp
 
-from .config import data_path
 
 log = logging.getLogger(__name__)
 
 YTDL_OPTIONS = {
     "format": "bestaudio[acodec=opus]/bestaudio/best*[acodec!=none]/best",
     "noplaylist": True,
-    "nocheckcertificate": True,
     "ignoreerrors": False,
     "quiet": True,
     "no_warnings": True,
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
-    "cookiefile": str(data_path("cookies.txt")),
     "js_runtimes": {"node": {}},
 }
 
@@ -106,6 +102,8 @@ class YTDLSource(discord.PCMVolumeTransformer):
         query: str,
         *,
         loop: asyncio.AbstractEventLoop,
+        media,
+        guild_id: int,
         volume: float = 0.5,
         filter_name: str | None = None,
         seek_seconds: int = 0,
@@ -115,10 +113,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
         is_live: bool = False,
     ) -> YTDLSource:
         """Create a playable source from a URL or search query."""
-        ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
-        data = await loop.run_in_executor(
-            None, lambda: ytdl.extract_info(query, download=False)
-        )
+        data = await media.extract(guild_id, query)
 
         if data is None:
             raise ValueError("No results found")
@@ -200,16 +195,11 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
     @staticmethod
     async def search(
-        query: str, *, loop: asyncio.AbstractEventLoop, limit: int = 5
+        query: str, *, loop: asyncio.AbstractEventLoop, media, guild_id: int, limit: int = 5
     ) -> list[TrackInfo]:
         """Search YouTube and return lightweight TrackInfo results."""
-        opts = {**YTDL_OPTIONS, "noplaylist": True, "extract_flat": "in_playlist"}
-        ytdl = yt_dlp.YoutubeDL(opts)
-
         search_query = f"ytsearch{limit * 2}:{query}"
-        data = await loop.run_in_executor(
-            None, lambda: ytdl.extract_info(search_query, download=False)
-        )
+        data = await media.extract(guild_id, search_query, flat=True)
 
         results: list[TrackInfo] = []
         for entry in (data or {}).get("entries", []) or []:

@@ -4,6 +4,22 @@ Test in order — earlier sections set up state for later ones.
 
 ---
 
+## 0. Owner setup and isolation
+
+Use dedicated test accounts and two Discord servers. Do not reuse production cookies in fixtures.
+
+- [ ] Install via `/invite`; the new server works without operator music credentials.
+- [ ] A non-owner administrator cannot open `/setup`; the owner receives an ephemeral private link.
+- [ ] Open a link once, then confirm reuse and expired links fail. Confirm a new link revokes the old session.
+- [ ] Upload fresh YouTube cookies for server A, test, and play; server B still requires its own setup.
+- [ ] Configure different Spotify applications in A and B; verify search and playlist resolution use each server's app.
+- [ ] Confirm expired/rejected cookies show an actionable failure without raw provider output.
+- [ ] Replace/remove YouTube credentials during playback and crossfade: audio stops, its queue clears, and pending extraction cannot resume old audio.
+- [ ] Transfer ownership, remove/reinvite the bot, and repeat after an offline interval: the former owner's credentials are removed.
+- [ ] Restart the host: saved credentials remain usable with the same encryption key; browser setup sessions are revoked.
+- [ ] Complete setup over public HTTPS and privately through the documented SSH tunnel.
+- [ ] Check connection tests with real YouTube and Spotify access; offline tests only validate plumbing and isolation.
+
 ## 1. Basic Playback
 
 - [ ] `/play <youtube url>` — single video, should join VC and start playing

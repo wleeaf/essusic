@@ -1,29 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HOST="${1:?Usage: ./deploy.sh host [browser]}"
-BROWSER="${2:-brave}"
-REMOTE_DIR="/opt/essusic"
-
-COOKIE_FILE="$(dirname "$0")/www.youtube.com_cookies.txt"
-
-echo "==> Checking cookies..."
-if [[ -f "$COOKIE_FILE" ]]; then
-    echo "    Using local cookie file: ${COOKIE_FILE}"
-    cp "$COOKIE_FILE" /tmp/essusic-cookies.txt
-else
-    echo "    Exporting cookies from ${BROWSER}..."
-    yt-dlp --cookies-from-browser "$BROWSER" --cookies /tmp/essusic-cookies.txt \
-        "https://www.youtube.com/watch?v=dQw4w9WgXcQ" --skip-download --quiet
-fi
+DEPLOY_HOST="${1:?Usage: ./deploy.sh ssh-host}"
 
 echo "==> Pushing latest code..."
 git push
 
-echo "==> Deploying to ${HOST}..."
-ssh "$HOST" "mkdir -p ${REMOTE_DIR}/data"
-scp /tmp/essusic-cookies.txt "${HOST}:${REMOTE_DIR}/data/cookies.txt"
-ssh "$HOST" "cd ${REMOTE_DIR} && git pull && docker compose up -d --build"
-rm /tmp/essusic-cookies.txt
+echo "==> Deploying to ${DEPLOY_HOST}..."
+# The existing checkout owns its .env and encrypted data; never export/copy browser cookies.
+ssh "$DEPLOY_HOST" 'cd /opt/essusic && git pull --ff-only && docker compose -f docker-compose.yml -f compose.web.yml up -d --build'
 
-echo "==> Done! Bot is running on ${HOST}"
+echo "==> Done. Server owners manage their sources through /setup."

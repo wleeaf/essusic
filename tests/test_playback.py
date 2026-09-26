@@ -84,13 +84,38 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.cog._send_player = AsyncMock()
         self.cog._update_np_channel = AsyncMock()
         self.cog._notify_text_channel = AsyncMock()
-        self.cog.spotify = SimpleNamespace(available=False)
+        self.cog.media = Mock()
+        self.cog.media.spotify.return_value = SimpleNamespace(available=False)
+        self.cog._active_players = {}
         self.vc = VoiceClient()
         self.guild = SimpleNamespace(id=1, voice_client=self.vc)
         self.queue = self.cog.queues.get(1)
         self.queue.current = TrackInfo('First', 'first', duration=120)
         self.queue.add(TrackInfo('Second', 'second', duration=120))
         self.addCleanup(self.cog._cancel_crossfade_timer, 1)
+
+    async def test_missing_source_preserves_queue_without_claiming_playback(self):
+        from music.providers import SourceError
+        self.vc.playing = False
+        with patch.object(YTDLSource, 'from_query', AsyncMock(side_effect=SourceError('Run /setup'))):
+            await self.cog._play_next(self.guild)
+        self.assertIsNone(self.queue.current)
+        self.assertEqual(self.queue.queue[0].title, 'Second')
+        self.assertEqual(self.vc.play_calls, 0)
+        self.assertIn('Run /setup', self.cog._notify_text_channel.await_args.args[1])
+        self.assertIn('/remove 1', self.cog._notify_text_channel.await_args.args[1])
+
+    async def test_revoking_during_resolution_cannot_restore_cleared_queue(self):
+        from music.providers import SourceError
+        self.vc.playing = False
+        async def fetch(*args, **kwargs):
+            self.queue.clear()  # owner removed the source while extraction was running
+            raise SourceError('Configuration changed')
+        with patch.object(YTDLSource, 'from_query', side_effect=fetch):
+            await self.cog._play_next(self.guild)
+        self.assertIsNone(self.queue.current)
+        self.assertFalse(self.queue.queue)
+        self.assertEqual(self.vc.play_calls, 0)
 
     async def test_crossfade_keeps_outgoing_alive_and_applies_volume_once(self):
         outgoing = self.vc.source
@@ -123,9 +148,8 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(incoming.cleaned)
 
     async def test_empty_youtube_search_returns_no_results(self):
-        with patch('music.audio_source.yt_dlp.YoutubeDL') as extractor:
-            extractor.return_value.extract_info.return_value = None
-            results = await YTDLSource.search('missing', loop=asyncio.get_running_loop())
+        media = SimpleNamespace(extract=AsyncMock(return_value=None))
+        results = await YTDLSource.search('missing', loop=asyncio.get_running_loop(), media=media, guild_id=1)
         self.assertEqual(results, [])
 
     async def test_crossfade_does_not_override_single_loop(self):

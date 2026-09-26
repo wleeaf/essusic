@@ -38,7 +38,8 @@ from music.queue_manager import (
     QueueManager,
     RatingsManager,
 )
-from music.spotify_resolver import SpotifyResolver
+from music.credentials import CredentialError, CredentialStore
+from music.providers import MediaService, SourceError, requires_youtube
 from music.url_parser import InputType, classify
 
 from music.presentation import (
@@ -787,6 +788,8 @@ _HELP_CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
         "⚙️ Settings",
         "settings",
         [
+            ("/setup", "Owner-only private setup for this server’s music sources"),
+            ("/invite", "Install Essusic in another server"),
             ("/maxqueue `<size>`", "Set the maximum queue size (default 50)"),
             ("/maxperuser `<limit>`", "Limit how many tracks each user can have in the queue"),
             ("/setnpchannel", "Set this channel as the now-playing display channel"),
@@ -810,7 +813,7 @@ def _build_help_embed(category_id: str) -> discord.Embed:
     embed = card(title="Make yourself at home", section="Welcome",
                  description="Your music, together. Start a track, build a queue, and settle in.",
                  footer="Choose a section below for commands and examples.")
-    embed.add_field(name="01 · Start listening", value="Join a voice channel. Use `/play` with a song name or link.", inline=False)
+    embed.add_field(name="01 · Start listening", value="Owner: connect sources with `/setup`. Then join voice and use `/play`.", inline=False)
     embed.add_field(name="02 · Find your rhythm", value="Open `/player` for controls, or `/search` to pick your next track.", inline=False)
     embed.add_field(name="03 · Keep the good ones", value="Save a track with `/fav` or keep the queue with `/playlist save`.", inline=False)
     return embed
@@ -855,7 +858,9 @@ class MusicCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.queues = QueueManager()
-        self.spotify = SpotifyResolver()
+        self.credentials = CredentialStore()
+        self.media = MediaService(self.credentials, guild_lookup=bot.get_guild)
+        self.setup_portal = None
         self.history = HistoryManager()
         self.favorites = FavoritesManager()
         self.playlists = PlaylistManager()
@@ -864,6 +869,95 @@ class MusicCog(commands.Cog):
         self._crossfade_timers: dict[int, asyncio.TimerHandle] = {}
         self._play_locks: dict[int, asyncio.Lock] = {}
         self._playing_guilds: set[int] = set()  # guilds currently playing audio
+
+    @app_commands.command(name="setup", description="Server owner: connect or manage this server's music sources")
+    @app_commands.default_permissions(manage_guild=True)
+    async def setup_sources(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != interaction.guild.owner_id:
+            await interaction.response.send_message(
+                embed=notice("Only the server owner can manage source credentials.", section="Server setup"), ephemeral=True)
+            return
+        if self.setup_portal is None:
+            await interaction.response.send_message(embed=notice(
+                "The bot operator must configure CREDENTIALS_KEY, WEB_BASE_URL and WEB_PORT, then restart the bot. "
+                "See the README for hosted and self-hosted setup.", section="Server setup"), ephemeral=True)
+            return
+        url = self.setup_portal.issue(interaction.guild.id, interaction.user.id)
+        view = discord.ui.View(timeout=300)
+        view.add_item(discord.ui.Button(label="Open private setup", url=url, emoji="🔐"))
+        await interaction.response.send_message(embed=notice(
+            "Connect YouTube and optional Spotify for **this server**. Your private link can be opened once, "
+            "within 5 minutes; the setup session lasts 15 minutes. Keep the link private. "
+            "Run /setup again to replace or remove credentials.", section="Server setup"), view=view, ephemeral=True)
+
+    @app_commands.command(name="invite", description="Install Essusic in another server")
+    async def invite(self, interaction: discord.Interaction) -> None:
+        permissions = discord.Permissions(view_channel=True, send_messages=True, embed_links=True,
+                                          attach_files=True, connect=True, speak=True)
+        url = discord.utils.oauth_url(self.bot.user.id, permissions=permissions,
+                                     scopes=("bot", "applications.commands"))
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="Add to a server", url=url))
+        await interaction.response.send_message(embed=notice(
+            "Invite Essusic, then have the server owner run /setup to connect their music sources.",
+            section="Install Essusic"), view=view, ephemeral=True)
+
+    async def revoke_source_playback(self, guild_id: int) -> None:
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return
+        gq = self.queues.get(guild_id)
+        mixing = guild.voice_client and isinstance(guild.voice_client.source, CrossfadeSource)
+        if not mixing and (not gq.current or not requires_youtube(gq.current.url)):
+            return
+        # Invalidate pending extraction/crossfade identity checks before yielding.
+        gq.clear()
+        self._cancel_crossfade_timer(guild_id)
+        self._cleanup_player(guild_id)
+        self.queues.save_queue_state(guild_id)
+        if guild_id in self._playing_guilds:
+            self._playing_guilds.discard(guild_id)
+            metric_active_players.dec()
+        if guild.voice_client:
+            await guild.voice_client.disconnect(force=True)
+        await self._update_presence(None)
+
+    async def _revoke_guild_sources(self, guild_id: int) -> None:
+        self.credentials.delete(guild_id)
+        self.media.invalidate(guild_id)
+        if self.setup_portal:
+            self.setup_portal.revoke(guild_id)
+        await self.revoke_source_playback(guild_id)
+
+    @commands.Cog.listener()
+    async def on_guild_remove(self, guild: discord.Guild) -> None:
+        await self._revoke_guild_sources(guild.id)
+
+    @commands.Cog.listener()
+    async def on_guild_update(self, before: discord.Guild, after: discord.Guild) -> None:
+        if before.owner_id != after.owner_id:
+            await self._revoke_guild_sources(after.id)
+
+    @commands.Cog.listener()
+    async def on_guild_available(self, guild: discord.Guild) -> None:
+        # Also catches ownership transfers while the bot was offline.
+        try:
+            owner_id = self.credentials.read(guild.id).get('owner_id')
+            if owner_id is not None and owner_id != guild.owner_id:
+                await self._revoke_guild_sources(guild.id)
+        except CredentialError:
+            log.warning("Source storage could not be opened for guild %s", guild.id)
+
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        await self.on_guild_available(guild)
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        # Remove credentials for servers the bot left while offline.
+        for path in self.credentials.directory.glob('*.enc'):
+            if path.stem.isdigit() and self.bot.get_guild(int(path.stem)) is None:
+                await self._revoke_guild_sources(int(path.stem))
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -886,6 +980,14 @@ class MusicCog(commands.Cog):
             )
             return False
         return True
+
+    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+        original = getattr(error, "original", error)
+        message = str(original) if isinstance(original, (SourceError, CredentialError)) else "The request could not be completed. Try again or ask the owner to check /setup."
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=notice(message, section="Music sources"), ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=notice(message, section="Music sources"), ephemeral=True)
 
     def _pause(self, guild: discord.Guild) -> None:
         guild.voice_client.pause()
@@ -946,7 +1048,7 @@ class MusicCog(commands.Cog):
 
     def _after_play(self, guild: discord.Guild, error: Exception | None) -> None:
         if error:
-            log.error("Playback error in guild %s: %s", guild.id, error)
+            log.error("Playback error in guild %s", guild.id)
         asyncio.run_coroutine_threadsafe(self._play_next(guild), self.bot.loop)
 
     async def _notify_text_channel(self, guild: discord.Guild, msg: str) -> None:
@@ -979,12 +1081,13 @@ class MusicCog(commands.Cog):
         self._cancel_crossfade_timer(guild.id)
         track = gq.next_track()
         if track is None:
+            spotify = self.media.spotify(guild.id)
             # Radio mode: continuously queue similar tracks
-            if gq.radio_mode and self.spotify.available and gq.radio_seed:
+            if gq.radio_mode and spotify.available and gq.radio_seed:
                 try:
                     results = await self.bot.loop.run_in_executor(
                         None,
-                        lambda: self.spotify.recommend_by_seed(
+                        lambda: spotify.recommend_by_seed(
                             gq.radio_seed, gq.radio_history, 1  # type: ignore[arg-type]
                         ),
                     )
@@ -1001,15 +1104,15 @@ class MusicCog(commands.Cog):
                         await self._notify_text_channel(
                             guild, f"Radio: queued **{rec.title}**"
                         )
-                except Exception as exc:
-                    log.warning("Radio recommendation failed: %s", exc)
+                except Exception:
+                    log.warning("Radio recommendation failed in guild %s", guild.id)
 
             # Autoplay: recommend a track based on what just played
             # Use gq.previous — next_track() already moved current → previous
-            if track is None and gq.autoplay and self.spotify.available and gq.previous is not None:
+            if track is None and gq.autoplay and spotify.available and gq.previous is not None:
                 try:
                     rec = await self.bot.loop.run_in_executor(
-                        None, self.spotify.recommend, gq.previous.title
+                        None, spotify.recommend, gq.previous.title
                     )
                     if rec:
                         gq.add(rec)
@@ -1017,8 +1120,8 @@ class MusicCog(commands.Cog):
                         await self._notify_text_channel(
                             guild, f"Autoplay: queued **{rec.title}**"
                         )
-                except Exception as exc:
-                    log.warning("Autoplay recommendation failed: %s", exc)
+                except Exception:
+                    log.warning("Autoplay recommendation failed in guild %s", guild.id)
 
             if track is None:
                 if guild.id in self._playing_guilds:
@@ -1032,14 +1135,30 @@ class MusicCog(commands.Cog):
 
         try:
             source = await YTDLSource.from_query(
-                track.url, loop=self.bot.loop, volume=gq.volume,
+                track.url, loop=self.bot.loop, media=self.media, guild_id=guild.id, volume=gq.volume,
                 filter_name=gq.filter_name,
                 speed=gq.speed, normalize=gq.normalize,
                 eq_bands=gq.eq_bands if any(g != 0 for g in gq.eq_bands) else None,
                 is_live=track.is_live,
             )
         except Exception as exc:
-            log.error("Failed to create source for %s: %s", track.title, exc)
+            if guild.voice_client is not vc or gq.current is not track or not vc.is_connected():
+                return
+            log.warning("Source resolution failed in guild %s (%s)", guild.id, type(exc).__name__)
+            if isinstance(exc, (SourceError, CredentialError)):
+                gq.queue.appendleft(track)
+                gq.current = None
+                if guild.id in self._playing_guilds:
+                    self._playing_guilds.discard(guild.id)
+                    metric_active_players.dec()
+                self._cleanup_player(guild.id)
+                await self._update_presence(None)
+                self.queues.save_queue_state(guild.id)
+                await self._notify_text_channel(
+                    guild, str(exc) + " Playback is waiting; the track remains first in /queue. "
+                    "Use /remove 1 to discard it before requesting another track."
+                )
+                return
             playback_errors_total.inc()
             await self._notify_text_channel(
                 guild, f"Failed to play **{track.title}**, skipping..."
@@ -1200,14 +1319,14 @@ class MusicCog(commands.Cog):
         next_track = gq.queue[0]
         try:
             incoming = await YTDLSource.from_query(
-                next_track.url, loop=self.bot.loop, volume=gq.volume,
+                next_track.url, loop=self.bot.loop, media=self.media, guild_id=guild.id, volume=gq.volume,
                 filter_name=gq.filter_name,
                 speed=gq.speed, normalize=gq.normalize,
                 eq_bands=gq.eq_bands if any(g != 0 for g in gq.eq_bands) else None,
                 is_live=next_track.is_live,
             )
-        except Exception as exc:
-            log.warning("Crossfade pre-fetch failed: %s", exc)
+        except Exception:
+            log.warning("Crossfade source resolution failed in guild %s", guild.id)
             return
 
         # Re-validate state after the async fetch — vc may have stopped or
@@ -1270,6 +1389,7 @@ class MusicCog(commands.Cog):
         if vc is None or gq.current is None:
             return
 
+        self.media.ensure_source(guild.id, gq.current.url)
         eq = gq.eq_bands if any(g != 0 for g in gq.eq_bands) else None
         is_live = gq.current.is_live
 
@@ -1296,7 +1416,7 @@ class MusicCog(commands.Cog):
         else:
             source = await YTDLSource.from_query(
                 gq.current.url,
-                loop=self.bot.loop,
+                loop=self.bot.loop, media=self.media, guild_id=guild.id,
                 volume=gq.volume,
                 filter_name=gq.filter_name,
                 seek_seconds=seek_seconds,
@@ -1325,6 +1445,7 @@ class MusicCog(commands.Cog):
     async def _enqueue_and_play(
         self, interaction: discord.Interaction, track: TrackInfo, *, play_next: bool = False
     ) -> None:
+        self.media.ensure_source(interaction.guild.id, track.url)
         vc = await self._ensure_voice(interaction)
         if vc is None:
             return
@@ -1411,7 +1532,8 @@ class MusicCog(commands.Cog):
 
         if not vc.is_playing() and not vc.is_paused():
             await self._play_next(interaction.guild)  # type: ignore[arg-type]
-            msg = f"Now playing: **{track.title}**"
+            msg = (f"Now playing: **{gq.current.title}**" if vc.is_playing() and gq.current
+                   else f"Added **{track.title}**. Playback has not started; check the source message above.")
         else:
             msg = f"Queued **{track.title}** at position #{pos}"
             if is_dup:
@@ -1429,25 +1551,12 @@ class MusicCog(commands.Cog):
     ) -> None:
         """Fetch a YouTube playlist and queue all its tracks."""
         try:
-            import yt_dlp
-            from music.audio_source import YTDL_OPTIONS
-
-            ytdl = yt_dlp.YoutubeDL(
-                {
-                    **YTDL_OPTIONS,
-                    "noplaylist": False,
-                    "extract_flat": "in_playlist",
-                    "extractor_args": {"youtubetab": {"skip": ["authcheck"]}},
-                }
-            )
-            data = await self.bot.loop.run_in_executor(
-                None, lambda: ytdl.extract_info(url, download=False)
-            )
+            data = await self.media.extract(interaction.guild.id, url, playlist=True, flat=True)
         except Exception as exc:
-            await interaction.followup.send(embed=notice(f"Could not load playlist: {exc}", section='Playback'))
+            await interaction.followup.send(embed=notice(str(exc) if isinstance(exc, (SourceError, CredentialError)) else "Could not load this playlist. Try another link.", section='Playback'))
             return
 
-        entries = data.get("entries") or []
+        entries = (data or {}).get("entries") or []
         if not entries:
             await interaction.followup.send(embed=notice("❌ No tracks found in that playlist.", section='Playback'))
             return
@@ -1527,13 +1636,9 @@ class MusicCog(commands.Cog):
     ) -> None:
         """Resolve a single YouTube URL or search query and queue it."""
         try:
-            import yt_dlp
-            from music.audio_source import YTDL_OPTIONS
-
-            ytdl = yt_dlp.YoutubeDL({**YTDL_OPTIONS, "skip_download": True})
-            data = await self.bot.loop.run_in_executor(
-                None, lambda: ytdl.extract_info(url, download=False)
-            )
+            data = await self.media.extract(interaction.guild.id, url)
+            if not data:
+                raise SourceError("No tracks found. Try another link or search.")
             if "entries" in data:
                 data = data["entries"][0]
 
@@ -1547,7 +1652,7 @@ class MusicCog(commands.Cog):
                 requester_id=interaction.user.id,
             )
         except Exception as exc:
-            await interaction.followup.send(embed=notice(f"Could not find anything: {exc}", section='Playback'))
+            await interaction.followup.send(embed=notice(str(exc) if isinstance(exc, (SourceError, CredentialError)) else "Could not resolve this track. Try another link.", section='Playback'))
             return
 
         await self._enqueue_and_play(interaction, track, play_next=play_next)
@@ -1557,6 +1662,7 @@ class MusicCog(commands.Cog):
     @app_commands.command(name="play", description="Play from a YouTube/Spotify URL or search keywords")
     @app_commands.describe(query="YouTube URL, Spotify URL, or search keywords")
     async def play(self, interaction: discord.Interaction, query: str) -> None:
+        self.media.ensure_source(interaction.guild.id, query)
         input_type, value = classify(query)
 
         # Spotify resolution
@@ -1565,25 +1671,26 @@ class MusicCog(commands.Cog):
             InputType.SPOTIFY_PLAYLIST,
             InputType.SPOTIFY_ALBUM,
         ):
-            if not self.spotify.available:
+            spotify = self.media.spotify(interaction.guild.id)
+            if not spotify.available:
                 await interaction.response.send_message(
-                    embed=notice("Spotify credentials are not configured.", section='Playback'), ephemeral=True
+                    embed=notice("Spotify is not configured for this server. Ask the owner to run /setup.", section='Playback'), ephemeral=True
                 )
                 return
 
             await interaction.response.defer()
 
             resolver_map = {
-                InputType.SPOTIFY_TRACK: self.spotify.resolve_track,
-                InputType.SPOTIFY_PLAYLIST: self.spotify.resolve_playlist,
-                InputType.SPOTIFY_ALBUM: self.spotify.resolve_album,
+                InputType.SPOTIFY_TRACK: spotify.resolve_track,
+                InputType.SPOTIFY_PLAYLIST: spotify.resolve_playlist,
+                InputType.SPOTIFY_ALBUM: spotify.resolve_album,
             }
             try:
                 search_strings = await self.bot.loop.run_in_executor(
                     None, resolver_map[input_type], value
                 )
-            except Exception as exc:
-                await interaction.followup.send(embed=notice(f"Spotify error: {exc}", section='Playback'))
+            except Exception:
+                await interaction.followup.send(embed=notice("Spotify could not complete the request. The owner can test the connection in /setup.", section='Playback'))
                 return
 
             if not search_strings:
@@ -1702,6 +1809,7 @@ class MusicCog(commands.Cog):
     @app_commands.command(name="playnext", description="Insert a track to play immediately after the current one")
     @app_commands.describe(query="YouTube URL, Spotify track URL, or search keywords")
     async def playnext(self, interaction: discord.Interaction, query: str) -> None:
+        self.media.ensure_source(interaction.guild.id, query)
         input_type, value = classify(query)
 
         # Reject playlists / streams — playnext is single-track only
@@ -1722,17 +1830,18 @@ class MusicCog(commands.Cog):
 
         # Resolve Spotify track to a search string
         if input_type == InputType.SPOTIFY_TRACK:
-            if not self.spotify.available:
+            spotify = self.media.spotify(interaction.guild.id)
+            if not spotify.available:
                 await interaction.followup.send(
-                    embed=notice("Spotify credentials are not configured.", section='Playback'), ephemeral=True
+                    embed=notice("Spotify is not configured for this server. Ask the owner to run /setup.", section='Playback'), ephemeral=True
                 )
                 return
             try:
                 search_strings = await self.bot.loop.run_in_executor(
-                    None, self.spotify.resolve_track, value
+                    None, spotify.resolve_track, value
                 )
-            except Exception as exc:
-                await interaction.followup.send(embed=notice(f"Spotify error: {exc}", section='Playback'))
+            except Exception:
+                await interaction.followup.send(embed=notice("Spotify could not complete the request. The owner can test the connection in /setup.", section='Playback'))
                 return
             if not search_strings:
                 await interaction.followup.send(embed=notice("❌ No tracks found from that Spotify link.", section='Playback'))
@@ -1882,7 +1991,7 @@ class MusicCog(commands.Cog):
         await interaction.response.send_message(embed=notice(f"🔊 Volume set to **{level}%**.", section='Sound settings'))
 
     async def _do_youtube_search(self, interaction: discord.Interaction, query: str) -> None:
-        results = await YTDLSource.search(query, loop=self.bot.loop, limit=5)
+        results = await YTDLSource.search(query, loop=self.bot.loop, media=self.media, guild_id=interaction.guild.id, limit=5)
         if not results:
             await interaction.followup.send(embed=notice("No results found.", section='Discover'))
             return
@@ -1892,14 +2001,15 @@ class MusicCog(commands.Cog):
         await interaction.followup.send(embed=embed, view=view)
 
     async def _do_spotify_search(self, interaction: discord.Interaction, query: str) -> None:
-        if not self.spotify.available:
+        spotify = self.media.spotify(interaction.guild.id)
+        if not spotify.available:
             await interaction.followup.send(
-                embed=notice("Spotify credentials are not configured.", section='Discover'), ephemeral=True
+                embed=notice("Spotify is not configured for this server. Ask the owner to run /setup.", section='Discover'), ephemeral=True
             )
             return
 
         results = await self.bot.loop.run_in_executor(
-            None, lambda: self.spotify.search(query, limit=5)
+            None, lambda: spotify.search(query, limit=5)
         )
         if not results:
             await interaction.followup.send(embed=notice("No results found.", section='Discover'))
@@ -2133,9 +2243,10 @@ class MusicCog(commands.Cog):
 
     @app_commands.command(name="autoplay", description="Toggle autoplay — auto-queue similar tracks when the queue runs out")
     async def autoplay(self, interaction: discord.Interaction) -> None:
-        if not self.spotify.available:
+        spotify = self.media.spotify(interaction.guild.id)
+        if not spotify.available:
             await interaction.response.send_message(
-                embed=notice("Autoplay requires Spotify credentials.", section='Playback'), ephemeral=True
+                embed=notice("Autoplay requires this server’s Spotify credentials. Ask the owner to run /setup.", section='Playback'), ephemeral=True
             )
             return
         gq = self.queues.get(interaction.guild.id)  # type: ignore[union-attr]
@@ -2896,8 +3007,9 @@ class MusicCog(commands.Cog):
 
     @app_commands.command(name="similar", description="Show Spotify recommendations based on the current track")
     async def similar(self, interaction: discord.Interaction) -> None:
-        if not self.spotify.available:
-            await interaction.response.send_message(embed=notice("Requires Spotify credentials.", section='Discover'), ephemeral=True)
+        spotify = self.media.spotify(interaction.guild.id)
+        if not spotify.available:
+            await interaction.response.send_message(embed=notice("Requires this server’s Spotify credentials. Ask the owner to run /setup.", section='Discover'), ephemeral=True)
             return
         gq = self.queues.get(interaction.guild.id)  # type: ignore[union-attr]
         if gq.current is None:
@@ -2908,10 +3020,10 @@ class MusicCog(commands.Cog):
         await interaction.response.defer()
         try:
             results = await self.bot.loop.run_in_executor(
-                None, lambda: self.spotify.recommend_multiple(current_title, 5)
+                None, lambda: spotify.recommend_multiple(current_title, 5)
             )
-        except Exception as exc:
-            log.warning("Similar tracks lookup failed: %s", exc)
+        except Exception:
+            log.warning("Similar tracks lookup failed in guild %s", interaction.guild.id)
             results = []
         if not results:
             await interaction.followup.send(embed=notice("No similar tracks found.", section='Discover'))
@@ -2923,8 +3035,10 @@ class MusicCog(commands.Cog):
     @app_commands.command(name="radio", description="Start endless radio — auto-queues similar tracks by artist or genre")
     @app_commands.describe(seed="Artist name or genre to seed the radio")
     async def radio(self, interaction: discord.Interaction, seed: str) -> None:
-        if not self.spotify.available:
-            await interaction.response.send_message(embed=notice("Requires Spotify credentials.", section='Discover'), ephemeral=True)
+        self.media.ensure_source(interaction.guild.id, "ytsearch:" + seed)
+        spotify = self.media.spotify(interaction.guild.id)
+        if not spotify.available:
+            await interaction.response.send_message(embed=notice("Requires this server’s Spotify credentials. Ask the owner to run /setup.", section='Discover'), ephemeral=True)
             return
         await interaction.response.defer()
         gq = self.queues.get(interaction.guild.id)  # type: ignore[union-attr]
@@ -2932,10 +3046,10 @@ class MusicCog(commands.Cog):
 
         try:
             results = await self.bot.loop.run_in_executor(
-                None, lambda: self.spotify.recommend_by_seed(seed, set(), 5)
+                None, lambda: spotify.recommend_by_seed(seed, set(), 5)
             )
-        except Exception as exc:
-            log.warning("Radio seed lookup failed: %s", exc)
+        except Exception:
+            log.warning("Radio seed lookup failed in guild %s", interaction.guild.id)
             results = []
         if not results:
             await interaction.followup.send(embed=notice(f"❌ No tracks found for **{seed}**.", section='Discover'))

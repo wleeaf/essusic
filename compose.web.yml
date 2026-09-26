@@ -1,0 +1,9 @@
+# docker compose -f docker-compose.yml -f compose.web.yml up -d --build
+# Publish only on loopback; put an HTTPS reverse proxy in front for remote owners.
+services:
+  bot:
+    environment:
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: 8080
+    ports:
+      - "127.0.0.1:8080:8080"

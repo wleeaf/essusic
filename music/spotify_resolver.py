@@ -1,31 +1,37 @@
 from __future__ import annotations
 
 import logging
-import os
 
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
+from spotipy.cache_handler import MemoryCacheHandler
 
 from .audio_source import TrackInfo
 
 log = logging.getLogger(__name__)
+# Spotipy logs Authorization headers at DEBUG and raw provider responses on errors.
+# Our call sites report safe failures; never forward those library messages.
+for _logger_name in ('spotipy.client', 'spotipy.oauth2'):
+    logging.getLogger(_logger_name).disabled = True
 
 
 class SpotifyResolver:
     """Resolves Spotify URLs to 'Artist - Title' strings for YouTube search."""
 
-    def __init__(self) -> None:
-        client_id = os.getenv("SPOTIFY_CLIENT_ID")
-        client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
+    def __init__(self, client_id: str | None = None, client_secret: str | None = None) -> None:
+        self._sp = None
         if not client_id or not client_secret:
-            log.warning("Spotify credentials not set — Spotify links will not work.")
-            self._sp = None
             return
-
         auth = SpotifyClientCredentials(
-            client_id=client_id, client_secret=client_secret
+            client_id=client_id, client_secret=client_secret,
+            cache_handler=MemoryCacheHandler(),
         )
-        self._sp = spotipy.Spotify(auth_manager=auth)
+        self._sp = spotipy.Spotify(auth_manager=auth, requests_timeout=15, retries=1, status_retries=1)
+
+    def test_connection(self) -> bool:
+        if self._sp is None:
+            return False
+        return bool(self._sp.search(q="track:music", type="track", limit=1).get("tracks"))
 
     @property
     def available(self) -> bool:
@@ -85,8 +91,8 @@ class SpotifyResolver:
         """Get top tracks from related artists, skipping exclude_ids."""
         try:
             related = self._sp.artist_related_artists(artist_id)
-        except Exception as exc:
-            log.warning("Spotify related artists failed: %s", exc)
+        except Exception:
+            log.warning("Spotify related artists request failed")
             return []
         out: list[tuple[str, TrackInfo]] = []
         for artist in related.get("artists", []):
@@ -160,8 +166,8 @@ class SpotifyResolver:
             return []
         try:
             track = self._sp.track(track_id)
-        except Exception as exc:
-            log.warning("Spotify resolve_track failed: %s", exc)
+        except Exception:
+            log.warning("Spotify track request failed")
             return []
         return [self._format_track(track)]
 
